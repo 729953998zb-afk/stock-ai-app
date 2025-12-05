@@ -204,4 +204,5 @@ with tab3:
             st.markdown(analyze_news_with_ai(f"{stock_info['名称']} 今日股价表现为 {stock_info['涨跌幅']}%，换手率 {stock_info['换手率']}%。"))
             
         else:
+
             st.error("未找到该股票代码，请输入正确的6位代码")
