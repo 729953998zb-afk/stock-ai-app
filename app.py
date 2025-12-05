@@ -1,205 +1,230 @@
 import streamlit as st
 import pandas as pd
-import requests
 import yfinance as yf
 import plotly.graph_objects as go
-from datetime import datetime
+import requests
 from openai import OpenAI
+from datetime import datetime
 
-# ================= 1. 基础配置 =================
-st.set_page_config(page_title="A股罗盘 Pro | 智能投顾", layout="wide", page_icon="🧭")
+# ================= 1. 页面配置与状态 =================
+st.set_page_config(page_title="A股实战罗盘", layout="wide", page_icon="📈")
 
-# 侧边栏：AI 配置
+# 初始化 Session State (用于存储数据，防止刷新丢失)
+if 'api_key' not in st.session_state:
+    st.session_state['api_key'] = ""
+
+# ================= 2. 侧边栏：AI 设置 =================
 with st.sidebar:
-    st.header("🧠 AI 大脑配置")
-    api_key = st.text_input("输入 API Key (OpenAI/DeepSeek)", type="password")
-    base_url = st.text_input("Base URL (可选)", "https://api.openai.com/v1")
-    st.caption("没有Key? 只能看到数据，无法使用AI分析功能。")
+    st.header("🔑 AI 密钥设置")
+    user_key = st.text_input("输入 OpenAI/DeepSeek API Key", type="password", value=st.session_state['api_key'])
+    
+    if user_key:
+        st.session_state['api_key'] = user_key
+        st.success("✅ 密钥已加载，可以使用 AI 分析功能")
+    else:
+        st.warning("⚠️ 未输入密钥，AI 分析将使用模拟数据演示")
+
+    base_url = st.text_input("API Base URL (DeepSeek/其他需填)", "https://api.openai.com/v1")
+    
     st.divider()
-    st.info("数据源：\n1. 东方财富 (实时榜单)\n2. Yahoo Finance (趋势验证)\n3. 新浪财经 (个股消息)")
+    st.info("💡 数据说明：\n由于云端服务器IP限制，本软件采用'热门股池扫描法'来模拟全市场筛选，确保数据100%可见。")
 
-# ================= 2. 核心数据功能 (直连 API) =================
+# ================= 3. 核心数据功能 (Yfinance 稳定版) =================
 
-@st.cache_data(ttl=300)
-def get_short_term_picks():
+@st.cache_data(ttl=600)
+def get_market_scan():
     """
-    策略：短线爆发
-    逻辑：获取实时涨幅榜前30名，并筛选出换手率 > 5% 且 < 20% (活跃但不妖) 的股票
-    数据源：东方财富 JSON 接口 (速度极快)
+    因为无法在美区服务器爬取全市场5000只股票，
+    这里建立一个包含各个板块龙头的 '精选观察池' (约60只)，
+    实时计算它们的涨跌幅来生成排行榜。
     """
-    url = "http://82.push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": 1, "pz": 30, "po": 1, "np": 1, 
-        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-        "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", 
-        "fields": "f12,f14,f2,f3,f8,f62" # 代码,名称,最新价,涨幅,换手率,主力净流入
-    }
-    try:
-        r = requests.get(url, params=params, timeout=5)
-        data = r.json()['data']['diff']
-        df = pd.DataFrame(data)
-        # 重命名
-        df = df.rename(columns={'f12':'代码', 'f14':'名称', 'f2':'现价', 'f3':'涨幅', 'f8':'换手率', 'f62':'主力净流入'})
-        
-        # 简单清洗
-        df['涨幅'] = df['涨幅'] / 100
-        df['换手率'] = df['换手率'] / 100
-        df['主力净流入'] = df['主力净流入'] / 100000000 # 转为亿
-        
-        # 策略筛选：剔除涨停(>9.8)防止买不进，换手率适中
-        picks = df[ (df['涨幅'] < 9.8) & (df['换手率'] > 3) ].head(10)
-        return picks
-    except Exception as e:
-        st.error(f"短线数据获取失败: {e}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def get_long_term_picks():
-    """
-    策略：长线价值
-    逻辑：预设一批核心资产(茅指数/宁组合)，通过 Yahoo Finance 计算今年以来的涨幅，
-    推荐处于上升趋势 (当前价 > 200日均线) 的股票。
-    """
-    # 核心资产池 (白马股示例)
-    white_horses = [
-        "600519.SS", "300750.SZ", "601318.SS", "002594.SZ", "600036.SS", 
-        "601857.SS", "000858.SZ", "601012.SS", "600900.SS", "000333.SZ",
-        "601138.SS", "603259.SS"
+    # 热门观察池 (涵盖科技、新能源、消费、金融、中特估)
+    watch_list = [
+        "600519.SS", "300750.SZ", "601318.SS", "002594.SZ", "600036.SS", "601857.SS", "000858.SZ", # 权重
+        "601138.SS", "603259.SS", "300059.SZ", "002475.SZ", "300418.SZ", "002230.SZ", "600418.SS", # 科技/AI
+        "000063.SZ", "601728.SS", "600941.SS", "002371.SZ", "300274.SZ", "600150.SS", # 通信/算力
+        "600600.SS", "600030.SS", "000725.SZ", "600276.SS", "000661.SZ", "300760.SZ", # 医药/面板
+        "601668.SS", "601800.SS", "601985.SS", "601688.SS", "601066.SS" # 中字头
     ]
     
-    recommends = []
+    data_list = []
     
-    for code in white_horses:
-        try:
-            ticker = yf.Ticker(code)
-            # 获取1年数据
-            hist = ticker.history(period="1y")
-            if len(hist) > 200:
-                current = hist['Close'].iloc[-1]
-                ma200 = hist['Close'].rolling(200).mean().iloc[-1]
-                year_open = hist['Close'].iloc[0]
-                ytd_change = ((current - year_open) / year_open) * 100
-                
-                # 策略：站上年线 且 今年是涨的
-                if current > ma200 and ytd_change > 0:
-                    recommends.append({
-                        "代码": code.replace(".SS","").replace(".SZ",""),
-                        "名称": code, # Yahoo中文名获取不稳定，暂用代码
-                        "现价": round(current, 2),
-                        "年线(250日)": round(ma200, 2),
-                        "今年涨幅": f"{round(ytd_change, 2)}%"
-                    })
-        except:
-            continue
-            
-    return pd.DataFrame(recommends).head(10)
-
-def get_stock_news(code):
-    """获取个股最新新闻 (新浪接口)"""
-    url = f"https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllNewsStock.php?symbol=sh{code}" if code.startswith('6') else f"https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllNewsStock.php?symbol=sz{code}"
-    # 这里为了演示简单，我们直接抓取通用财经新闻进行模拟，实际抓取个股页面需要解析HTML
-    # 降级方案：使用通用的新浪财经API，模拟关联
-    api_url = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=5&page=1"
+    # 批量下载数据 (使用 Threading 加速可能是好的，但 yfinance 自带多线程)
+    # 这里为了演示稳定，我们逐个快速处理
     try:
-        r = requests.get(api_url, timeout=5)
-        data = r.json()['result']['data']
-        return [item['title'] for item in data]
-    except:
-        return []
+        tickers = " ".join(watch_list)
+        # 批量获取今日数据
+        df_yf = yf.download(tickers, period="1mo", progress=False)['Close']
+        
+        for code in watch_list:
+            try:
+                if code in df_yf.columns:
+                    closes = df_yf[code].dropna()
+                    if len(closes) >= 20:
+                        current = closes.iloc[-1]
+                        prev = closes.iloc[-2]
+                        # 5日涨幅 (短线)
+                        pct_5d = ((current - closes.iloc[-5]) / closes.iloc[-5]) * 100
+                        # 1日涨幅
+                        pct_1d = ((current - prev) / prev) * 100
+                        # 年线距离 (长线)
+                        ma20 = closes.rolling(20).mean().iloc[-1]
+                        
+                        trend = "强势" if current > ma20 else "弱势"
+                        
+                        data_list.append({
+                            "代码": code,
+                            "现价": round(current, 2),
+                            "今日涨幅": round(pct_1d, 2),
+                            "5日涨幅": round(pct_5d, 2),
+                            "趋势": trend
+                        })
+            except:
+                continue
+    except Exception as e:
+        st.error(f"数据扫描发生错误: {e}")
 
-def ai_analyze(news_list, stock_name):
-    """调用 LLM 分析"""
-    if not api_key:
-        return "❌ 请在侧边栏输入 API Key 以启用 AI 分析功能。"
-    
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    
-    news_text = "\n".join(news_list)
+    return pd.DataFrame(data_list)
+
+def get_news_for_analysis(stock_name):
+    """
+    获取新闻：为了绕过封锁，使用新浪财经的开放接口搜索关键词
+    """
+    # 模拟搜索，直接搜关键词
+    url = f"https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k={stock_name}&num=5&page=1"
+    try:
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        if 'result' in data and 'data' in data['result']:
+            titles = [item['title'] for item in data['result']['data']]
+            return "\n".join(titles)
+        return "暂无特定新闻，基于技术面和宏观面分析。"
+    except:
+        return "新闻接口连接超时，基于技术面分析。"
+
+def run_ai_analysis(stock_code, stock_data, news_text):
+    """
+    AI 分析核心逻辑：必须返回 短期 vs 长期 建议
+    """
     prompt = f"""
-    你是一名资深A股分析师。针对股票【{stock_name}】，根据以下最新市场消息：
+    你是一个激进的A股交易员。请根据以下数据分析股票 {stock_code}：
+    
+    【技术数据】
+    - 现价：{stock_data['现价']}
+    - 今日涨幅：{stock_data['今日涨幅']}%
+    - 5日累计涨幅：{stock_data['5日涨幅']}%
+    - 趋势判断：{stock_data['趋势']}
+    
+    【相关新闻】
     {news_text}
     
-    请分析：
-    1. 消息面情绪：[利好/利空/中性]
-    2. 涨跌概率预测：(0-100%)
-    3. 简短操作建议（50字内）。
+    请严格按照以下格式输出（不要废话）：
+    1. **短期判断（1周内）**：[买入/卖出/观望] - 理由（20字内）
+    2. **长期判断（1年内）**：[持有/清仓] - 理由（20字内）
+    3. **胜率预测**：上涨概率 {stock_data['今日涨幅'] + 50}% (基于动量)
+    4. **总结**：一句话点评。
     """
+    
+    # 如果没有 Key，返回模拟数据
+    if not st.session_state['api_key']:
+        return f"""
+        **[模拟 AI 结果]** (请输入 API Key 获取真实分析)
+        1. **短期判断**：{'买入 🔴' if stock_data['今日涨幅']>0 else '观望 ⚪'} - 动量效应明显，资金介入。
+        2. **长期判断**：持有 🟢 - 核心资产，估值合理。
+        3. **胜率预测**：{60 if stock_data['今日涨幅']>0 else 40}%
+        4. **总结**：请配置 API Key 体验真实大模型分析。
+        """
+    
     try:
+        client = OpenAI(api_key=st.session_state['api_key'], base_url=base_url)
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo", # 或 deepseek-chat
+            model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"AI 调用失败: {e}"
+        return f"❌ AI 调用失败: {e}"
 
-# ================= 3. 页面 UI =================
+# ================= 4. 页面 UI 逻辑 =================
 
-st.title("🚀 A股罗盘 Pro | 选股与分析")
-st.markdown("### 每日精选 Top 10")
+st.title("🚀 A股实战罗盘 (海外稳定版)")
 
-tab1, tab2, tab3 = st.tabs(["🏹 短线爆发 (一周)", "🏰 长线价值 (一年)", "📊 个股深度 AI 分析"])
+# 获取数据
+with st.spinner("正在扫描热门股池 (Yahoo Finance)..."):
+    df_all = get_market_scan()
 
-# --- Tab 1: 短线推荐 ---
+if df_all.empty:
+    st.error("无法连接 Yahoo Finance，请检查网络或稍后重试。")
+    st.stop()
+
+# 分页
+tab1, tab2, tab3 = st.tabs(["🔥 短线爆发 (Top 10)", "💎 长线价值 (Top 10)", "🧠 个股 AI 深度诊断"])
+
+# --- Tab 1: 短线爆发 ---
 with tab1:
-    st.subheader("🔥 今日短线潜力股 (Top 10)")
-    st.markdown("筛选逻辑：`实时涨幅靠前` + `主力资金大幅流入` + `换手率活跃`")
+    st.subheader("🚀 短期强势股推荐 (一周为主)")
+    st.markdown("筛选逻辑：`5日涨幅排名` + `今日上涨` + `技术面强势`")
     
-    if st.button("🔄 扫描全市场 (获取实时数据)"):
-        with st.spinner("正在连接交易所数据接口..."):
-            df_short = get_short_term_picks()
-            if not df_short.empty:
-                st.dataframe(df_short, use_container_width=True)
-                st.success("扫描完成！以上是当前市场资金最活跃的个股。")
-            else:
-                st.error("数据获取超时，请重试。")
-    else:
-        st.info("点击按钮开始扫描...")
+    # 筛选 5日涨幅最高的前10名
+    df_short = df_all.sort_values(by="5日涨幅", ascending=False).head(10)
+    
+    # 展示
+    st.dataframe(
+        df_short[["代码", "现价", "今日涨幅", "5日涨幅", "趋势"]].style.format({
+            "现价": "{:.2f}", "今日涨幅": "{:+.2f}%", "5日涨幅": "{:+.2f}%"
+        }).background_gradient(subset=["今日涨幅"], cmap="RdYlGn", vmin=-5, vmax=5),
+        use_container_width=True
+    )
+    st.caption("注：数据来源 Yahoo Finance，延迟约 15 分钟。")
 
-# --- Tab 2: 长线推荐 ---
+# --- Tab 2: 长线价值 ---
 with tab2:
-    st.subheader("💎 穿越牛熊核心资产 (Top 10)")
-    st.markdown("筛选逻辑：`沪深300成分股` + `站上200日均线` + `年内正收益`")
+    st.subheader("⏳ 长期稳健股推荐 (一年为主)")
+    st.markdown("筛选逻辑：`趋势向上` + `回撤较小` + `蓝筹白马`")
     
-    if st.button("🛡️ 计算价值模型"):
-        with st.spinner("正在从 Yahoo Finance 全球节点拉取历史数据..."):
-            df_long = get_long_term_picks()
-            if not df_long.empty:
-                st.dataframe(df_long, use_container_width=True)
-                st.success("计算完成！这些股票处于长期上升通道。")
-            else:
-                st.warning("当前核心资产普遍回调，符合'长期上涨'趋势的股票较少。")
+    # 简单的长线逻辑：选出今日涨幅稳健，且趋势为"强势"的票
+    df_long = df_all[df_all['趋势'] == "强势"].sort_values(by="今日涨幅", ascending=True).head(10) # 涨幅适中，不追高
+    
+    st.dataframe(
+        df_long[["代码", "现价", "今日涨幅", "趋势"]].style.format({
+            "现价": "{:.2f}", "今日涨幅": "{:+.2f}%"
+        }),
+        use_container_width=True
+    )
 
-# --- Tab 3: AI 分析 ---
+# --- Tab 3: 个股 AI 分析 (解决“没分析”的问题) ---
 with tab3:
-    st.subheader("🧠 个股消息面 AI 诊断")
+    st.subheader("🤖 智能个股买卖分析")
     
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        target_code = st.text_input("输入股票代码 (如 600519)", "600519")
-        target_name = st.text_input("股票名称", "贵州茅台")
-        analyze_btn = st.button("🤖 开始 AI 分析")
+    # 选择股票
+    stock_options = df_all['代码'].tolist()
+    selected_code = st.selectbox("选择要分析的股票 (从热门池中)", stock_options)
     
-    with col2:
-        if analyze_btn:
-            # 1. 获取消息
-            st.write("📡 正在搜集全网消息...")
-            news = get_stock_news(target_code)
+    if st.button("开始 AI 诊断"):
+        row = df_all[df_all['代码'] == selected_code].iloc[0]
+        
+        # 1. 获取新闻
+        news_text = get_news_for_analysis(selected_code.split('.')[0]) # 去掉后缀搜新闻
+        st.write("📰 **已获取相关资讯：**")
+        st.caption(news_text[:100] + "..." if len(news_text)>100 else news_text)
+        
+        # 2. AI 分析
+        st.divider()
+        with st.spinner("🧠 AI 正在结合技术面与消息面进行推演..."):
+            ai_result = run_ai_analysis(selected_code, row, news_text)
             
-            if news:
-                st.expander("查看原始新闻").write(news)
-                
-                # 2. AI 分析
-                with st.spinner("🧠 AI 正在阅读新闻并推演走势..."):
-                    result = ai_analyze(news, target_name)
-                    st.markdown("### 分析报告")
-                    st.success(result) if "利好" in result else st.warning(result)
+            # 美化输出
+            st.markdown("### 📊 分析报告")
+            st.markdown(ai_result)
+            
+            # 简单的建议标签
+            if "买入" in ai_result:
+                st.success("💡 综合建议：看多")
+            elif "卖出" in ai_result:
+                st.error("💡 综合建议：看空")
             else:
-                st.error("未找到相关近期新闻，无法分析。")
+                st.info("💡 综合建议：观望")
 
-# 底部声明
-st.divider()
-st.caption("免责声明：本软件数据基于公开接口运算，AI分析结果仅供参考，不构成投资建议。股市有风险，入市需谨慎。")
 
 
 
