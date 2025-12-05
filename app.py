@@ -11,21 +11,14 @@ import re
 st.set_page_config(
     page_title="AlphaQuant Pro | 稳定运行版",
     layout="wide",
-    page_icon="🎓",
+    page_icon="🛡️",
     initial_sidebar_state="expanded"
 )
-
-# 宏观逻辑库
-MACRO_LOGIC = [
-    "大盘环境配合，主力资金正在抢筹，这种时候胆子要大一点",
-    "板块轮动到了这里，之前的补涨需求很强，容易出大阳线",
-    "虽然基本面一般，但技术面已经走出来了，跟着资金做短线",
-    "业绩超预期，机构正在建仓，这种票拿长线很稳"
-]
 
 # 初始化 Session
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
+# 确保 watchlist 是列表且内部没有重复数据 (初始化)
 if 'watchlist' not in st.session_state: 
     st.session_state['watchlist'] = [{"code": "600519.SS", "name": "贵州茅台"}]
 
@@ -140,11 +133,7 @@ def run_ai_tutor(stock_data, base_url):
     你是一个说话直白、幽默的资深老股民（投资导师）。
     你要给炒股小白分析这只股票：{stock_data['名称']} ({stock_data['代码']})。
     数据如下：现价{stock_data['现价']} (涨幅 {stock_data['涨幅']}%)，均线情况：{stock_data['大白话']}
-    请输出一份分析，包含：
-    1. 【人话总结】
-    2. 【小白能买吗？】
-    3. 【风险在哪里？】
-    4. 【操作剧本】
+    请输出一份分析，包含：1.【人话总结】 2.【小白能买吗？】 3.【风险在哪里？】 4.【操作剧本】
     """
     if not key or not key.startswith("sk-"):
         return f"> **🤖 免费模式**\n\n**小白能买吗？**：{stock_data['信号']}\n\n**为什么？**\n{stock_data['大白话']}"
@@ -169,7 +158,7 @@ def login_page():
 def main_app():
     with st.sidebar:
         st.title("AlphaQuant Pro")
-        st.caption("小白实战版 v16.0 (修复版)")
+        st.caption("稳定性修复版 v17.0")
         menu = st.radio("功能菜单", ["🔎 个股深度分析", "👀 我的关注", "🔮 每日金股预测", "⚙️ 设置"])
         if st.button("退出登录"): st.session_state['logged_in']=False; st.rerun()
 
@@ -220,19 +209,31 @@ def main_app():
             if c2.button("添加"):
                 c, n = search_online_realtime(add_kw)
                 if c: 
-                    st.session_state['watchlist'].append({"code":c, "name":n})
-                    st.success(f"已添加 {n}"); time.sleep(0.5); st.rerun()
+                    # --- 修复逻辑：检查是否已存在 ---
+                    exists = False
+                    for item in st.session_state['watchlist']:
+                        if item['code'] == c:
+                            exists = True
+                            break
+                    
+                    if not exists:
+                        st.session_state['watchlist'].append({"code":c, "name":n})
+                        st.success(f"已添加 {n}")
+                        time.sleep(0.5); st.rerun()
+                    else:
+                        st.warning(f"{n} 已经在关注列表中了")
                 else: st.error("未找到")
 
         if st.session_state['watchlist']:
-            for item in st.session_state['watchlist']:
+            # --- 修复逻辑：使用 enumerate 获取索引 i ---
+            # 这样 key=f"del_{item['code']}_{i}" 就能保证唯一，避免报错
+            for i, item in enumerate(st.session_state['watchlist']):
                 d = get_deep_analysis(item['code'], item['name'])
                 if d:
                     with st.container(border=True):
                         c1, c2, c3 = st.columns([2, 3, 1])
                         with c1: st.markdown(f"**{d['名称']}**"); st.caption(d['代码'])
                         
-                        # --- 修复后的 UI 渲染代码 ---
                         with c2: 
                             if d['颜色'] == 'green':
                                 st.success(f"建议：{d['信号']}")
@@ -244,8 +245,10 @@ def main_app():
                                 st.warning(f"建议：{d['信号']}")
                                 
                         with c3: 
-                            if st.button("🗑️", key=f"del_{item['code']}"):
-                                st.session_state['watchlist'].remove(item); st.rerun()
+                            # 使用索引 i 来构建唯一的 Key，彻底解决 DuplicateElementKey 错误
+                            if st.button("🗑️", key=f"del_{item['code']}_{i}"):
+                                st.session_state['watchlist'].remove(item)
+                                st.rerun()
 
     # --- 3. 金股预测 ---
     elif menu == "🔮 每日金股预测":
