@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -5,10 +6,9 @@ import requests
 from openai import OpenAI
 
 # ================= 1. 基础配置 =================
-st.set_page_config(page_title="A股罗盘 Pro | 中文版", layout="wide", page_icon="🇨🇳")
+st.set_page_config(page_title="A股罗盘 | 纯中文版", layout="wide", page_icon="🇨🇳")
 
-# --- 核心修复：内置代码转中文名称字典 ---
-# 无论 Yahoo 返回什么，我们都在界面上强制显示这些中文名
+# --- 核心：定义中文名映射 (这是我们的字典) ---
 NAME_MAP = {
     "600519.SS": "贵州茅台", "300750.SZ": "宁德时代", "601318.SS": "中国平安", 
     "002594.SZ": "比亚迪",   "600036.SS": "招商银行", "601857.SS": "中国石油", 
@@ -20,117 +20,123 @@ NAME_MAP = {
     "600030.SS": "中信证券", "000725.SZ": "京东方A",  "600276.SS": "恒瑞医药", 
     "000661.SZ": "长春高新", "300760.SZ": "迈瑞医疗", "601668.SS": "中国建筑", 
     "601800.SS": "中国交建", "601985.SS": "中国核电", "601688.SS": "华泰证券", 
-    "601066.SS": "中信建投"
+    "601066.SS": "中信建投", "600900.SS": "长江电力", "601919.SS": "中远海控"
 }
 
-# 提取代码列表用于扫描
+# 提取代码列表
 WATCH_LIST = list(NAME_MAP.keys())
 
-# 初始化 Session State
+# 初始化 API Key
 if 'api_key' not in st.session_state:
     st.session_state['api_key'] = ""
 
-# ================= 2. 侧边栏设置 =================
+# ================= 2. 侧边栏 =================
 with st.sidebar:
-    st.title("⚙️ 设置")
-    user_key = st.text_input("OpenAI/DeepSeek API Key", type="password", value=st.session_state['api_key'])
+    st.title("⚙️ 系统设置")
+    
+    # API Key 输入
+    user_key = st.text_input("输入 OpenAI/DeepSeek API Key", type="password", value=st.session_state['api_key'])
     if user_key:
         st.session_state['api_key'] = user_key
-        st.success("✅ AI 密钥已加载")
+        st.success("✅ 密钥已加载")
     
-    base_url = st.text_input("Base URL (DeepSeek需填)", "https://api.openai.com/v1")
-    st.info("数据源：Yahoo Finance (已启用中文映射)")
+    base_url = st.text_input("Base URL (DeepSeek必填)", "https://api.openai.com/v1")
+    
+    st.divider()
+    if st.button("🗑️ 强制刷新数据"):
+        st.cache_data.clear()
+        st.rerun()
 
-# ================= 3. 核心数据逻辑 =================
+# ================= 3. 核心数据逻辑 (强制匹配中文) =================
 
-@st.cache_data(ttl=600)
-def get_market_scan():
-    """扫描热门股并匹配中文名"""
+@st.cache_data(ttl=300)
+def get_data_force_chinese():
+    """
+    逻辑：先拿到数据，然后遍历 NAME_MAP 字典。
+    只有字典里有的，才放进结果列表，并强行赋予中文名。
+    """
     data_list = []
-    tickers = " ".join(WATCH_LIST)
+    tickers_str = " ".join(WATCH_LIST)
     
     try:
-        # 批量下载数据
-        df_yf = yf.download(tickers, period="1mo", progress=False)
+        # 下载数据
+        df_yf = yf.download(tickers_str, period="1mo", progress=False)
         
-        # 处理 yfinance 返回多层索引的情况 (Open, Close 等)
+        # 提取收盘价 (处理多层索引问题)
         if isinstance(df_yf.columns, pd.MultiIndex):
-            closes = df_yf['Close']
-        else:
-            closes = df_yf['Close'] # 备用
-
-        for code in WATCH_LIST:
             try:
-                # 获取单只股票数据
+                closes = df_yf['Close']
+            except:
+                closes = df_yf
+        else:
+            closes = df_yf
+
+        # 遍历我们的字典 (而不是遍历下载的数据)
+        # 这样能保证：只要字典里有中文，结果里一定有中文
+        for code, cn_name in NAME_MAP.items():
+            try:
+                # 尝试从下载的数据里找这个代码
+                # 有时候 yfinance 返回的列名没有 .SS 或 .SZ，需要模糊匹配一下
+                series = None
                 if code in closes.columns:
-                    series = closes[code].dropna()
+                    series = closes[code]
                 else:
-                    continue
+                    # 尝试去掉后缀匹配 (比如 600519.SS -> 600519)
+                    short_code = code.split('.')[0]
+                    if short_code in closes.columns:
+                         series = closes[short_code]
                 
-                if len(series) >= 5:
+                # 如果找到了数据
+                if series is not None and len(series.dropna()) >= 5:
+                    series = series.dropna()
                     current = series.iloc[-1]
                     prev = series.iloc[-2]
                     curr_5d = series.iloc[-5]
                     
-                    # 计算指标
+                    # 涨跌幅
                     pct_1d = ((current - prev) / prev) * 100
                     pct_5d = ((current - curr_5d) / curr_5d) * 100
                     
-                    # 趋势判断
+                    # 趋势
                     ma20 = series.rolling(20).mean().iloc[-1]
-                    trend = "📈 强势" if current > ma20 else "📉 弱势"
+                    trend = "强势" if current > ma20 else "弱势"
                     
+                    # 写入列表 (注意：'名称' 字段被写死为 cn_name)
                     data_list.append({
-                        "名称": NAME_MAP.get(code, code), # 👈 这里核心！把代码转中文
-                        "代码": code,
-                        "现价": round(current, 2),
-                        "今日涨幅": round(pct_1d, 2),
-                        "5日涨幅": round(pct_5d, 2),
+                        "中文名称": cn_name,  # 👈 核心：直接用字典里的中文
+                        "股票代码": code,
+                        "现价": float(current),
+                        "今日涨幅": float(pct_1d),
+                        "5日涨幅": float(pct_5d),
                         "趋势": trend
                     })
-            except Exception as e:
-                continue
+            except Exception as inner_e:
+                continue # 某个股票失败不影响其他的
                 
     except Exception as e:
-        st.error(f"数据扫描出错: {e}")
+        st.error(f"严重错误: {e}")
         return pd.DataFrame()
 
     return pd.DataFrame(data_list)
 
-def get_news_dummy(stock_name):
-    """
-    为了演示效果，若抓取不到新闻，返回模拟新闻摘要。
-    真实环境中这需要强大的爬虫，这里为了稳定性做兜底。
-    """
-    return f"市场关于【{stock_name}】的近期讨论主要集中在行业政策支持与主力资金流向。近期板块热度有所回升，机构调研频繁。"
-
-def run_ai_analysis(stock_name, stock_code, row_data):
-    """AI 分析逻辑，强制带入中文名"""
-    
-    # 模拟数据（当没有Key时）
+def run_ai_analysis(cn_name, code, row_data):
+    """AI 分析函数"""
     if not st.session_state['api_key']:
-        direction = "买入" if row_data['今日涨幅'] > 0 else "观望"
-        return f"""
-        **[模拟演示结果]** (请输入 API Key 查看真实分析)
-        1. **短期判断**：{direction} - {stock_name} 近期动能较强。
-        2. **长期判断**：持有 - 行业龙头，护城河深。
-        3. **建议**：请在左侧侧边栏输入 Key 以激活大模型大脑。
-        """
-
+        return f"请配置 API Key 以查看对【{cn_name}】的真实分析。当前模拟建议：{cn_name} 属于行业龙头，长期看好。"
+    
     prompt = f"""
-    你是一名A股交易员。请分析股票：{stock_name} ({stock_code})。
+    分析A股股票：{cn_name} (代码 {code})。
     
-    【技术面数据】
-    - 现价：{row_data['现价']}
-    - 今日涨幅：{row_data['今日涨幅']}%
-    - 5日趋势：{row_data['5日涨幅']}% ({row_data['趋势']})
+    【实时数据】
+    - 现价：{row_data['现价']:.2f}
+    - 今日涨跌：{row_data['今日涨幅']:.2f}%
+    - 5日趋势：{row_data['5日涨幅']:.2f}% ({row_data['趋势']})
     
-    请严格输出：
-    1. **短期操作（1周）**：[买入/卖出/观望] - 理由(20字内)
-    2. **长期价值（1年）**：[低估/高估/合理] - 理由(20字内)
-    3. **综合点评**：一句话总结。
+    请输出简报（必须包含中文名）：
+    1. **{cn_name}-短线建议**：[买入/卖出] 理由...
+    2. **{cn_name}-长线建议**：[持有/减仓] 理由...
+    3. **风险提示**：一句话。
     """
-    
     try:
         client = OpenAI(api_key=st.session_state['api_key'], base_url=base_url)
         response = client.chat.completions.create(
@@ -139,76 +145,81 @@ def run_ai_analysis(stock_name, stock_code, row_data):
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"AI 连接失败: {e}"
+        return f"AI 报错: {e}"
 
-# ================= 4. 页面 UI =================
+# ================= 4. 页面显示逻辑 =================
 
-st.title("🇨🇳 A股实战罗盘 (中文显示修复版)")
+st.title("🇨🇳 A股实战罗盘 (中文强制修正版)")
 
-with st.spinner("正在从全球节点拉取数据并翻译名称..."):
-    df_all = get_market_scan()
+with st.spinner("正在从全球节点同步数据并匹配中文名..."):
+    df_all = get_data_force_chinese()
 
 if df_all.empty:
-    st.error("数据加载失败，请刷新页面重试。")
+    st.error("数据暂时无法获取，请点击侧边栏'强制刷新数据'按钮。")
     st.stop()
 
-# 分页
-tab1, tab2, tab3 = st.tabs(["🔥 短线爆发 (Top 10)", "💎 长线价值 (Top 10)", "🧠 个股 AI 诊断"])
+# 定义显示的列配置 (强制格式化)
+column_config = {
+    "中文名称": st.column_config.TextColumn("股票名称", help="公司中文全称"),
+    "股票代码": st.column_config.TextColumn("代码"),
+    "现价": st.column_config.NumberColumn("现价", format="¥%.2f"),
+    "今日涨幅": st.column_config.NumberColumn("今日涨幅", format="%.2f%%"),
+    "5日涨幅": st.column_config.NumberColumn("5日涨幅", format="%.2f%%"),
+}
+
+tab1, tab2, tab3 = st.tabs(["🔥 短线榜 (中文)", "💎 长线榜 (中文)", "🧠 AI 深度分析"])
 
 # --- Tab 1: 短线 ---
 with tab1:
-    st.subheader("🚀 一周内强势爆发股")
-    st.markdown("按 `5日涨幅` 排序，寻找短期资金正在攻击的中文股票。")
-    
+    st.subheader("🚀 短期爆发力排行榜")
     # 排序
     df_short = df_all.sort_values(by="5日涨幅", ascending=False).head(10)
+    # 强制重新排列列顺序，把中文名称放第一位
+    df_display = df_short[["中文名称", "现价", "今日涨幅", "5日涨幅", "股票代码"]]
     
-    # 显示 (隐藏掉代码列，只看中文名)
     st.dataframe(
-        df_short[["名称", "现价", "今日涨幅", "5日涨幅", "趋势"]].style.format({
-            "现价": "{:.2f}", "今日涨幅": "{:+.2f}%", "5日涨幅": "{:+.2f}%"
-        }).background_gradient(subset=["今日涨幅"], cmap="RdYlGn", vmin=-5, vmax=5),
+        df_display,
+        column_config=column_config,
         use_container_width=True,
         hide_index=True
     )
 
 # --- Tab 2: 长线 ---
 with tab2:
-    st.subheader("⏳ 一年期稳健白马")
-    st.markdown("筛选逻辑：`趋势为强势` 且 `今日涨幅为正` 的优质资产。")
-    
-    df_long = df_all[df_all['趋势'] == "📈 强势"].sort_values(by="今日涨幅", ascending=True).head(10)
+    st.subheader("⏳ 长期价值排行榜")
+    # 筛选
+    df_long = df_all[df_all['趋势']=="强势"].sort_values(by="今日涨幅", ascending=True).head(10)
+    # 重新排列
+    df_display_long = df_long[["中文名称", "现价", "今日涨幅", "趋势", "股票代码"]]
     
     st.dataframe(
-        df_long[["名称", "现价", "今日涨幅", "趋势"]].style.format({
-            "现价": "{:.2f}", "今日涨幅": "{:+.2f}%"
-        }),
+        df_display_long,
+        column_config=column_config,
         use_container_width=True,
         hide_index=True
     )
 
 # --- Tab 3: AI 分析 ---
 with tab3:
-    st.subheader("🤖 智能个股买卖分析")
+    st.subheader("🤖 智能个股诊断")
     
-    # 下拉框里现在显示的是 "名称 (代码)" 格式，方便选择
-    select_options = [f"{row['名称']} ({row['代码']})" for index, row in df_all.iterrows()]
-    selected_option = st.selectbox("请选择一只股票进行诊断：", select_options)
+    # 制作下拉框选项：显示 "贵州茅台 (600519.SS)"
+    select_map = {f"{row['中文名称']} ({row['股票代码']})": row['股票代码'] for index, row in df_all.iterrows()}
+    selected_label = st.selectbox("请选择股票：", list(select_map.keys()))
     
-    if st.button("开始 AI 深度计算"):
-        # 解析选择的股票
-        selected_name = selected_option.split(" (")[0]
-        selected_code = selected_option.split(" (")[1].replace(")", "")
-        
-        # 找到对应行数据
-        row_data = df_all[df_all['代码'] == selected_code].iloc[0]
+    if st.button("开始 AI 分析"):
+        # 找回数据
+        selected_code = select_map[selected_label]
+        # 从原始数据中提取中文名
+        row_data = df_all[df_all['股票代码'] == selected_code].iloc[0]
+        cn_name = row_data['中文名称']
         
         st.divider()
-        st.markdown(f"### 📊 分析报告：{selected_name}")
+        st.markdown(f"### 📊 分析报告：{cn_name}")
         
-        with st.spinner("AI 正在结合技术指标进行推演..."):
-            ai_result = run_ai_analysis(selected_name, selected_code, row_data)
-            st.info(ai_result)
+        with st.spinner(f"AI 正在分析 {cn_name} 的技术面..."):
+            ai_res = run_ai_analysis(cn_name, selected_code, row_data)
+            st.info(ai_res)
 
 
 
