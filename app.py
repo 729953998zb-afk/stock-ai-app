@@ -1,208 +1,55 @@
 import streamlit as st
 import pandas as pd
-import akshare as ak
-import plotly.graph_objects as go
-from datetime import datetime
-import os
+import requests
 
-# ================= 配置区域 =================
-# 1. 设置页面
-st.set_page_config(page_title="A股罗盘 Pro | AI驱动", layout="wide", page_icon="📈")
+st.set_page_config(page_title="连接测试诊断", layout="wide")
 
-# 2. 大模型配置 (这里以 OpenAI 格式为例，可兼容 DeepSeek/Moonshot/百度)
-# 如果你有 API Key，并将 USE_REAL_AI 改为 True
-USE_REAL_AI = True  # ⚠️ 改为 True 启用真实 AI
-API_KEY = "sk-729953998" 
-BASE_URL = "https://api.openai.com/v1" # 或 DeepSeek/百度 的 Base URL
+st.title("🛠️ Streamlit Cloud 连接诊断模式")
 
-# ================= 核心功能函数 =================
+# --- 测试 1: 检查库是否安装 ---
+st.subheader("1. 环境检查")
+try:
+    import akshare as ak
+    st.success(f"✅ AkShare 库已安装，版本: {ak.__version__}")
+except ImportError:
+    st.error("❌ AkShare 未安装！请检查 GitHub 仓库中是否有 requirements.txt 文件。")
+    st.stop()
 
-# 1. 获取真实大盘数据 (AkShare)
-@st.cache_data(ttl=300) # 缓存5分钟
-def get_market_index():
-    try:
-        # 获取上证指数实时数据
-        stock_zh_index_spot_df = ak.stock_zh_index_spot()
-        # 筛选上证指数
-        sh_index = stock_zh_index_spot_df[stock_zh_index_spot_df['名称'] == '上证指数'].iloc[0]
-        return sh_index
-    except:
-        return None
+# --- 测试 2: 检查基础网络连通性 ---
+st.subheader("2. 国际互联网连通性测试")
+try:
+    response = requests.get("https://www.google.com", timeout=5)
+    st.success(f"✅ 能够访问 Google (Status: {response.status_code}) - 说明云端服务器网络正常")
+except Exception as e:
+    st.warning(f"⚠️ 无法访问 Google: {e}")
 
-# 2. 获取实时个股数据
-def get_stock_price(symbol):
-    try:
-        # 示例：获取个股行情
-        df = ak.stock_zh_a_spot_em()
-        stock = df[df['代码'] == symbol].iloc[0]
-        return stock
-    except:
-        return None
+# --- 测试 3: 检查国内数据源连通性 (AkShare) ---
+st.subheader("3. AkShare 数据源穿透测试")
+st.write("Streamlit Cloud 服务器位于海外，可能会被国内财经网站拦截。")
 
-# 3. 获取最新财经新闻
-@st.cache_data(ttl=600)
-def get_latest_news():
-    try:
-        # 获取东方财富的即时财经新闻
-        news_df = ak.stock_info_global_cls_em() # 财联社电报
-        return news_df.head(10) # 取前10条
-    except:
-        return pd.DataFrame()
-
-# 4. AI 分析模块 (核心)
-def analyze_news_with_ai(news_content):
-    if not USE_REAL_AI:
-        # 模拟 AI 返回 (用于演示)
-        import random
-        sentiments = ["利好 🔴", "利空 🟢", "中性 ⚪️"]
-        analysis = f"【AI模拟分析】：检测到关键词与政策强相关。建议关注板块资金流向。({random.choice(sentiments)})"
-        return analysis
-
-    # --- 真实 AI 调用代码 ---
-    from openai import OpenAI
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+if st.button("开始 AkShare 数据抓取测试"):
     
-    prompt = f"""
-    你是一位专业的A股分析师。请分析以下新闻对中国股市的影响：
-    新闻内容：{news_content}
-    
-    请输出：
-    1. 情感判断：[利好/利空/中性]
-    2. 影响板块：[具体行业]
-    3. 简短点评（50字以内）。
-    """
-    
+    # 测试 A: 新闻接口 (通常较容易成功)
+    st.write("--- 测试 A: 获取财经新闻 ---")
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo", # 或 deepseek-chat
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        return response.choices[0].message.content
+        with st.spinner("正在抓取财联社电报..."):
+            news_df = ak.stock_info_global_cls_em()
+            if not news_df.empty:
+                st.success(f"✅ 成功获取新闻！共 {len(news_df)} 条")
+                st.dataframe(news_df.head(3))
+            else:
+                st.warning("⚠️ 接口返回了空数据")
     except Exception as e:
-        return f"AI分析失败: {str(e)}"
+        st.error(f"❌ 新闻接口失败 (可能是被反爬拦截): {e}")
 
-# ================= 页面 UI 逻辑 =================
+    # 测试 B: 实时股价接口 (容易被封)
+    st.write("--- 测试 B: 获取上证指数 ---")
+    try:
+        with st.spinner("正在抓取大盘数据..."):
+            index_df = ak.stock_zh_index_spot()
+            sh_index = index_df[index_df['名称'] == '上证指数']
+            st.success(f"✅ 成功获取指数: {sh_index['最新价'].values[0]}")
+    except Exception as e:
+        st.error(f"❌ 股价接口失败: {e}")
+        st.info("💡 提示：如果新闻能用但股价不能用，说明该接口对海外IP有严格限制。")
 
-# --- 侧边栏：宏观驾驶舱 ---
-with st.sidebar:
-    st.title("🧭 A股罗盘 Pro")
-    st.caption("数据源：AkShare | 分析：LLM")
-    
-    st.divider()
-    st.header("🌍 实时大盘")
-    
-    index_data = get_market_index()
-    if index_data is not None:
-        c1, c2 = st.columns(2)
-        idx_val = index_data['最新价']
-        idx_change = index_data['涨跌额']
-        idx_pct = index_data['涨跌幅']
-        
-        color = "normal" if idx_change >= 0 else "inverse"
-        st.metric("上证指数", f"{idx_val}", f"{idx_pct}%", delta_color=color)
-        st.metric("成交额", f"{index_data['成交额']/100000000:.1f}亿", "实时")
-    else:
-        st.warning("数据接口连接超时")
-
-    st.info("💡 提示：点击右上角 'Deploy' 可分享给朋友")
-
-# --- 主界面 ---
-st.header("🤖 AI 智能选股分析系统")
-
-tab1, tab2, tab3 = st.tabs(["⚡️ 短线爆发 (AI舆情)", "🛡️ 长线优质 (基本面)", "🔍 查个股"])
-
-# === 模块1：短线爆发 (结合新闻 + AI) ===
-with tab1:
-    st.subheader("🔥 实时舆情风口 (AkShare + AI)")
-    st.markdown("自动抓取最新财经电报，并利用大模型分析利好利空。")
-    
-    if st.button("🔄 刷新最新新闻"):
-        st.cache_data.clear()
-        st.rerun()
-    
-    news_df = get_latest_news()
-    
-    if not news_df.empty:
-        for index, row in news_df.iterrows():
-            with st.container(border=True):
-                col_news, col_ai = st.columns([3, 2])
-                
-                with col_news:
-                    time_str = row['发布时间']
-                    content = row['内容']
-                    st.markdown(f"**⏰ {time_str}**")
-                    st.write(content)
-                
-                with col_ai:
-                    if st.button(f"🤖 AI 分析影响", key=f"btn_{index}"):
-                        with st.spinner("AI 正在读取新闻并推演资金流向..."):
-                            analysis_result = analyze_news_with_ai(content)
-                            st.markdown(analysis_result)
-                    else:
-                        st.caption("点击按钮让AI分析此消息对股市的影响")
-    else:
-        st.error("暂未获取到新闻数据，请稍后刷新")
-
-# === 模块2：长线优质 (基本面筛选) ===
-with tab2:
-    st.subheader("🛡️ 核心资产池")
-    st.markdown("这里预设了一些符合高ROE、低估值标准的优质股，实时拉取现价。")
-    
-    # 这里定义你的长线股票池 (示例)
-    long_term_stocks = [
-        {"code": "600519", "name": "贵州茅台"},
-        {"code": "601318", "name": "中国平安"},
-        {"code": "300750", "name": "宁德时代"},
-        {"code": "600036", "name": "招商银行"},
-        {"code": "601857", "name": "中国石油"} # 中特估
-    ]
-    
-    col1, col2, col3 = st.columns(3)
-    
-    for i, stock in enumerate(long_term_stocks):
-        real_data = get_stock_price(stock['code'])
-        
-        # 轮流放入列中
-        with [col1, col2, col3][i % 3]:
-            with st.container(border=True):
-                if real_data is not None:
-                    name = real_data['名称']
-                    price = real_data['最新价']
-                    pct = real_data['涨跌幅']
-                    vol = real_data['成交量']
-                    
-                    st.metric(name, f"¥{price}", f"{pct}%")
-                    st.caption(f"代码: {stock['code']}")
-                    
-                    # 简单的逻辑判断
-                    if pct > 0:
-                        st.markdown("🔴 **趋势：** 资金流入，维持多头。")
-                    else:
-                        st.markdown("🟢 **趋势：** 回调震荡，关注支撑。")
-                else:
-                    st.write(f"{stock['name']} 数据加载失败")
-
-# === 模块3：个股查询 ===
-with tab3:
-    st.subheader("🔍 个股深度诊断")
-    symbol_input = st.text_input("请输入股票代码 (如 000001)", "")
-    
-    if symbol_input:
-        stock_info = get_stock_price(symbol_input)
-        if stock_info is not None:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("名称", stock_info['名称'])
-            c2.metric("最新价", stock_info['最新价'], f"{stock_info['涨跌幅']}%")
-            c3.metric("换手率", f"{stock_info['换手率']}%")
-            
-            st.info(f"最高: {stock_info['最高']} | 最低: {stock_info['最低']} | 成交额: {float(stock_info['成交额'])/1e8:.2f}亿")
-            
-            # 这里可以接入 Tushare 的财务数据接口
-            st.markdown("### 📈 AI 综合建议")
-            st.write("结合当前宏观环境与个股走势，AI模型正在计算...")
-            st.markdown(analyze_news_with_ai(f"{stock_info['名称']} 今日股价表现为 {stock_info['涨跌幅']}%，换手率 {stock_info['换手率']}%。"))
-            
-        else:
-
-            st.error("未找到该股票代码，请输入正确的6位代码")
