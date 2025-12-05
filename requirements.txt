@@ -1,5 +1,7 @@
 streamlit
-akshare
-pandas
+akshare>=1.13.0
+pandas>=2.0.0
 plotly
-openai
+requests
+yfinance
+beautifulsoup4
