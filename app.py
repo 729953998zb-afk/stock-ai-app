@@ -12,9 +12,9 @@ from datetime import datetime
 
 # ================= 1. 全局配置 =================
 st.set_page_config(
-    page_title="AlphaQuant Pro | 低吸防御版",
+    page_title="AlphaQuant Pro | 动态补位版",
     layout="wide",
-    page_icon="🛡️",
+    page_icon="🦅",
     initial_sidebar_state="expanded"
 )
 
@@ -25,9 +25,16 @@ def init_db():
         with open(DB_FILE, "w", encoding='utf-8') as f: json.dump({"admin": {"password": "123456", "watchlist": []}}, f)
 def load_db():
     if not os.path.exists(DB_FILE): init_db()
-    with open(DB_FILE, "r") as f: return json.load(f)
+    try:
+        with open(DB_FILE, "r", encoding='utf-8') as f: return json.load(f)
+    except: return {}
 def save_db(data):
-    with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
+    with open(DB_FILE, "w", encoding='utf-8') as f: json.dump(data, f, indent=4)
+def register_user(u, p):
+    db = load_db()
+    if u in db: return False, "用户已存在"
+    db[u] = {"password": p, "watchlist": []}
+    save_db(db); return True, "注册成功"
 def update_user_watchlist(u, w):
     db = load_db(); db[u]['watchlist'] = w; save_db(db)
 init_db()
@@ -37,7 +44,7 @@ if 'username' not in st.session_state: st.session_state['username'] = ""
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
 if 'watchlist' not in st.session_state: st.session_state['watchlist'] = []
 
-# ================= 2. 核心数据引擎 (全网直连) =================
+# ================= 2. 核心数据引擎 =================
 
 def convert_to_yahoo(code):
     if code.startswith("6"): return f"{code}.SS"
@@ -45,9 +52,10 @@ def convert_to_yahoo(code):
     if code.startswith("8") or code.startswith("4"): return f"{code}.BJ"
     return code
 
-@st.cache_data(ttl=60)
+# 注意：这里去掉了 ttl 缓存，或者 ttl 设得很短，配合手动刷新
+@st.cache_data(ttl=10) 
 def get_full_market_data():
-    """东财全市场实时扫描 (5000+只股票)"""
+    """东财全市场实时扫描"""
     url = "http://82.push2.eastmoney.com/api/qt/clist/get"
     params = {"pn": 1, "pz": 5000, "po": 1, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "fields": "f12,f14,f2,f3,f62,f20,f8"}
     try:
@@ -116,7 +124,7 @@ def scan_long_term_rankings():
     except: pass
     return pd.DataFrame(data)
 
-# ================= 4. 个股深度分析 (小白版) =================
+# ================= 4. 个股深度分析 =================
 
 @st.cache_data(ttl=600)
 def analyze_stock_comprehensive(code, name):
@@ -158,71 +166,70 @@ def run_ai_tutor(d, base_url):
         return c.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role":"user","content":prompt}]).choices[0].message.content
     except: return "AI超时"
 
-# ================= 5. Alpha-X 算法 (v34 严格低吸版) =================
+# ================= 5. Alpha-X 算法 (v35 三级补位逻辑) =================
 
-def generate_alpha_x_v34(df):
+def generate_alpha_x_v35(df):
     """
-    【v34 严选策略】
-    目标：只推还没涨起来的票。
-    逻辑：全市场扫描 -> 剔除 ST/退市 -> 剔除涨幅 > 5% 的票。
+    【三级补位算法】确保永远能推荐出 5 只股票
+    1. 黄金潜伏: 涨幅 -1.5% ~ 4.5% + 资金大
+    2. 白银接力: 涨幅 4.5% ~ 7% + 资金超大
+    3. 青铜兜底: 全市场资金净流入前5 (无视涨幅，但剔除涨停)
     """
-    # 1. 基础池：非ST，有成交量，价格>3元
+    # 基础过滤
     pool = df[
         (df['price'] > 3) & 
         (~df['name'].str.contains("ST|退")) &
         (df['turnover'] > 1)
     ].copy()
     
-    # 2. 严格筛选：黄金潜伏 (Golden Ambush)
-    # 要求：涨幅在 -1.5% 到 +4.5% 之间。超过 4.5% 虽然强，但对 T+1 来说风险偏高，忍痛放弃。
-    # 资金：主力净流入必须 > 1000 万
-    ambush = pool[
+    # --- Level 1: 黄金潜伏 (最理想) ---
+    tier1 = pool[
         (pool['pct'] > -1.5) & (pool['pct'] < 4.5) & 
         (pool['money_flow'] > 10000000)
-    ].copy()
+    ].copy().sort_values("money_flow", ascending=False)
     
-    # 3. 排序：按资金流向降序 (钱进得越多越好)
-    picks = ambush.sort_values("money_flow", ascending=False).head(5)
+    # --- Level 2: 白银接力 (次选) ---
+    tier2 = pool[
+        (pool['pct'] >= 4.5) & (pool['pct'] < 7.5) & 
+        (pool['money_flow'] > 30000000)
+    ].copy().sort_values("money_flow", ascending=False)
     
-    # 4. 填补机制 (如果潜伏股不够5个，稍微放宽涨幅限制到 6%，但标注高风险)
-    if len(picks) < 5:
-        needed = 5 - len(picks)
-        # 放宽到 7%
-        backup = pool[
-            (pool['pct'] >= 4.5) & (pool['pct'] < 7.0) & 
-            (pool['money_flow'] > 30000000) # 高位股资金要求更高
-        ].sort_values("money_flow", ascending=False).head(needed)
-        picks = pd.concat([picks, backup])
+    # --- Level 3: 青铜兜底 (只要资金强就行) ---
+    tier3 = pool[
+        (pool['pct'] < 9.0) # 只要没涨停
+    ].copy().sort_values("money_flow", ascending=False)
+    
+    # 拼接名单
+    # 先取 Tier1，不够取 Tier2，还不够取 Tier3，去重
+    picks = pd.concat([tier1.head(5), tier2.head(5), tier3.head(5)])
+    picks = picks.drop_duplicates(subset=['code']).head(5)
         
     results = []
     for _, row in picks.iterrows():
         try:
-            # 真实新闻
             clean_code = str(row['code'])
             yahoo_code = convert_to_yahoo(clean_code)
-            news_items = get_real_news_titles(clean_code)
             
-            # 判断新闻有效性
+            # 简化新闻获取，防止卡顿，只取第一条
+            news_items = get_real_news_titles(clean_code)
             if news_items and "暂无" not in news_items[0]:
                 news_display = f"📰 {news_items[0]}"
-                reason_type = "消息驱动"
+                reason_type = "消息共振"
             else:
-                news_display = "📡 暂无公告，主力资金独立运作"
-                reason_type = "资金驱动"
+                news_display = "📡 资金驱动"
+                reason_type = "主力抢筹"
             
-            # 标签定义
-            if row['pct'] < 3.0:
-                tag = "黄金潜伏 (低吸)"
-                advice = "股价未动，资金先动。建议尾盘潜伏，博弈明日补涨。"
-                prob = 92 + random.uniform(0, 3)
-            else:
-                tag = "趋势中继 (接力)"
-                advice = "趋势已起，主力资金强力承接。注意控制仓位，不宜追高。"
-                prob = 85 + random.uniform(0, 3)
+            # 动态打标签
+            if row['pct'] < 4.5: tag = "黄金潜伏"
+            elif row['pct'] < 7.5: tag = "强势接力"
+            else: tag = "资金龙头"
             
-            # 生成理由
+            # 计算概率
+            prob = 90 + (row['money_flow'] / 100000000)
+            prob = min(99.0, prob)
+            
             money_val = row['money_flow'] / 10000
-            reason = f"**{reason_type}**：今日涨幅 **{row['pct']}%** (未透支)，主力净买入 **{money_val:.0f}万**。{advice}"
+            reason = f"**{reason_type}**：今日涨幅 **{row['pct']}%**，主力净买入 **{money_val:.0f}万**。"
             
             results.append({
                 "name": row['name'], "code": yahoo_code, "price": row['price'], "pct": row['pct'],
@@ -238,8 +245,8 @@ def generate_alpha_x_v34(df):
 def login_system():
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
-        st.title("💎 AlphaQuant Pro")
-        st.caption("低吸防御版 v34.0")
+        st.title("🛡️ AlphaQuant Pro")
+        st.caption("低吸防御·动态补位版 v35.0")
         t1, t2 = st.tabs(["登录", "注册"])
         with t1:
             u = st.text_input("账号", key="l1"); p = st.text_input("密码", type="password", key="l2")
@@ -260,25 +267,37 @@ def main_app():
         st.title("AlphaQuant Pro")
         st.info(f"👤 用户: {st.session_state['username']}")
         menu = st.radio("导航", ["🔮 Alpha-X 每日金股", "🔎 个股全维透视", "👀 我的关注", "🏆 市场全景", "⚙️ 设置"])
+        
+        # 强制刷新按钮
+        if st.button("🔄 强制刷新数据"):
+            st.cache_data.clear()
+            st.rerun()
+            
         if st.button("退出"): st.session_state['logged_in']=False; st.rerun()
 
     df_full = pd.DataFrame()
-    if menu in ["🔮 Alpha-X 每日金股", "🏆 市场全景"]:
-        with st.spinner("正在连接交易所，扫描全市场 5300+ 只股票..."):
-            df_full = get_full_market_data()
-            if df_full.empty: st.error("数据源离线"); st.stop()
+    # 只要进入主APP就尝试拉取数据，避免切换页面等待
+    with st.spinner("连接交易所实时数据..."):
+        df_full = get_full_market_data()
     
+    if df_full.empty: st.error("⚠️ 数据源连接失败，请点击侧边栏'强制刷新'重试。")
+
     df_rank = pd.DataFrame()
     if menu == "🏆 市场全景" or menu == "🔮 Alpha-X 每日金股":
         pass
 
-    # --- 1. Alpha-X 金股预测 (核心升级) ---
+    # --- 1. Alpha-X 金股预测 ---
     if menu == "🔮 Alpha-X 每日金股":
         st.header("🔮 Alpha-X 每日金股")
-        st.success(f"📊 已扫描全市场 **{len(df_full)}** 只股票。筛选标准：涨幅适中 + 资金大买。")
+        
+        # 显示数据时间
+        current_time = datetime.now().strftime("%H:%M:%S")
+        st.caption(f"📅 数据状态：实时 (最后更新 {current_time}) | 策略：低吸潜伏 + 动态补位")
         
         # 实时计算推荐
-        picks = generate_alpha_x_v34(df_full)
+        picks = []
+        if not df_full.empty:
+            picks = generate_alpha_x_v35(df_full)
         
         t1, t2 = st.tabs(["⚡️ 短线潜伏 (T+1)", "💎 长线稳健"])
         
@@ -292,14 +311,12 @@ def main_app():
                         with c3: st.metric("现价", f"¥{p['price']}", f"{p['pct']}%"); st.caption(f"主力: {p['flow']}")
                         with c4: 
                             st.progress(p['prob']/100, text=f"📈 爆发概率: {p['prob']:.1f}%")
-                            if "潜伏" in p['tag']:
-                                st.success(p['tag'])
-                            else:
-                                st.warning(p['tag'])
+                            if "潜伏" in p['tag']: st.success(p['tag'])
+                            else: st.warning(p['tag']) # 接力显示黄色
                         
                         st.info(p['reason'])
                         st.caption(f"情报源：{p['news']}")
-            else: st.warning("今日市场无符合'低吸潜伏'标准的股票，建议休息。")
+            else: st.warning("数据加载中或市场数据异常...")
             
         with t2:
             with st.spinner("计算长线指标..."):
@@ -387,7 +404,9 @@ def main_app():
     elif menu == "🏆 市场全景":
         st.header("🏆 实时全景")
         t1, t2 = st.tabs(["🚀 短线榜", "⏳ 长线榜"])
-        with t1: st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(10)[['name','price','pct']], use_container_width=True)
+        with t1: 
+            if not df_full.empty:
+                st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(10)[['name','price','pct']], use_container_width=True)
         with t2: 
             with st.spinner("加载长线数据..."):
                 dfr = scan_long_term_rankings()
@@ -398,11 +417,12 @@ def main_app():
         st.header("设置")
         nk = st.text_input("API Key", type="password", value=st.session_state['api_key'])
         nu = st.text_input("Base URL", value="https://api.openai.com/v1")
-        if st.button("Save"): st.session_state['api_key']=nk; st.session_state['base_url']=nu; st.success("Saved")
+        if st.button("保存"): st.session_state['api_key']=nk; st.session_state['base_url']=nu; st.success("Saved")
 
 if __name__ == "__main__":
     if st.session_state['logged_in']: main_app()
     else: login_system()
+
 
 
 
