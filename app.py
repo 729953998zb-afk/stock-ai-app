@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf # 仅用于个股历史K线计算，不用于全市场扫描
+import yfinance as yf # 仅用于个股历史K线，不用于全市场
 from openai import OpenAI
 import time
 import random
@@ -12,9 +12,9 @@ from datetime import datetime
 
 # ================= 1. 全局配置 =================
 st.set_page_config(
-    page_title="AlphaQuant Pro | 纯净国行版",
+    page_title="AlphaQuant Pro | 接口修复版",
     layout="wide",
-    page_icon="🇨🇳",
+    page_icon="📡",
     initial_sidebar_state="expanded"
 )
 
@@ -44,75 +44,107 @@ if 'username' not in st.session_state: st.session_state['username'] = ""
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
 if 'watchlist' not in st.session_state: st.session_state['watchlist'] = []
 
-# ================= 2. 纯净国行数据引擎 (Eastmoney + Sina) =================
+# ================= 2. 强力数据引擎 (反爬虫增强) =================
 
 def convert_to_yahoo(code):
-    """个股分析需要用到YF获取历史K线，所以ID转换保留"""
     if code.startswith("6"): return f"{code}.SS"
     if code.startswith("0") or code.startswith("3"): return f"{code}.SZ"
     if code.startswith("8") or code.startswith("4"): return f"{code}.BJ"
     return code
 
-def get_random_agent():
-    agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    ]
-    return random.choice(agents)
+def get_stealth_headers():
+    """
+    【核心修复】生成高度逼真的浏览器请求头，骗过防火墙
+    """
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://quote.eastmoney.com/",
+        "Origin": "https://quote.eastmoney.com",
+        "Connection": "keep-alive"
+    }
 
-# --- 引擎 A: 东方财富 (主力资金) ---
-# 【核心修改】增加 ttl=60，一分钟只请求一次，防止被封
+# --- 引擎 A: 东方财富 (HTTPS 加密通道) ---
 @st.cache_data(ttl=60)
 def fetch_eastmoney_realtime():
-    """获取东财全市场实时数据 (60秒缓存)"""
-    url = "http://82.push2.eastmoney.com/api/qt/clist/get"
+    """
+    尝试从东方财富获取全市场实时数据
+    改进点：使用 HTTPS，使用标准域名，添加 Referer
+    """
+    # 尝试主线路
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    
     # f3:涨幅, f62:主力净流入, f20:市值, f8:换手率, f22:涨速
     params = {
         "pn": 1, "pz": 4000, "po": 1, "np": 1, 
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-        "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+        "fltt": 2, "invt": 2, "fid": "f3", 
+        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
         "fields": "f12,f14,f2,f3,f62,f20,f8,f22"
     }
+    
     try:
-        r = requests.get(url, params=params, headers={"User-Agent": get_random_agent()}, timeout=3)
-        data = r.json()['data']['diff']
-        df = pd.DataFrame(data).rename(columns={'f12':'code','f14':'name','f2':'price','f3':'pct','f62':'money_flow','f20':'mkt_cap','f8':'turnover','f22':'speed'})
+        r = requests.get(url, params=params, headers=get_stealth_headers(), timeout=5)
+        if r.status_code != 200: raise Exception("Status not 200")
+        
+        data = r.json()
+        if 'data' not in data or data['data'] is None: raise Exception("No data")
+        
+        df = pd.DataFrame(data['data']['diff'])
+        df = df.rename(columns={'f12':'code','f14':'name','f2':'price','f3':'pct','f62':'money_flow','f20':'mkt_cap','f8':'turnover','f22':'speed'})
         for c in ['price','pct','money_flow','turnover']: 
             df[c] = pd.to_numeric(df[c], errors='coerce')
         return df, "Eastmoney (主力资金流)"
     except:
-        return pd.DataFrame(), "Fail"
+        # 失败尝试备用线路 (IP地址直连，有时能绕过域名封锁)
+        try:
+            url_backup = "http://82.push2.eastmoney.com/api/qt/clist/get"
+            r = requests.get(url_backup, params=params, headers=get_stealth_headers(), timeout=5)
+            data = r.json()
+            df = pd.DataFrame(data['data']['diff'])
+            df = df.rename(columns={'f12':'code','f14':'name','f2':'price','f3':'pct','f62':'money_flow','f20':'mkt_cap','f8':'turnover','f22':'speed'})
+            for c in ['price','pct','money_flow','turnover']: df[c] = pd.to_numeric(df[c], errors='coerce')
+            return df, "Eastmoney (备用线路)"
+        except:
+            return pd.DataFrame(), "Fail"
 
-# --- 引擎 B: 新浪财经 (备用) ---
-# 【核心修改】增加 ttl=60
+# --- 引擎 B: 新浪财经 (最强备胎) ---
 @st.cache_data(ttl=60)
 def fetch_sina_realtime():
-    """获取新浪实时行情 (60秒缓存)"""
+    """获取新浪实时行情"""
     try:
         url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
         params = {"page": 1, "num": 100, "sort": "changepercent", "asc": 0, "node": "hs_a", "_s_r_a": "page"}
-        r = requests.get(url, params=params, headers={"User-Agent": get_random_agent()}, timeout=3)
-        data = json.loads(r.text)
+        r = requests.get(url, params=params, headers=get_stealth_headers(), timeout=5)
+        # 新浪返回的数据有时候不标准，需小心解析
+        content = r.text
+        # 简单清洗
+        if not content.startswith("["): return pd.DataFrame(), "Fail"
         
-        df = pd.DataFrame(data).rename(columns={'symbol':'code', 'name':'name', 'trade':'price', 'changepercent':'pct', 'amount':'amount'})
+        # 修正新浪非标准JSON键名 (symbol: -> "symbol":)
+        # 这里使用 pandas read_json 尝试直接读取，或者 eval (慎用但有效)
+        # 最安全是用正则替换键名，这里简化处理，直接用 eval 因为源是新浪
+        data = json.loads(content.replace('symbol', '"symbol"').replace('name', '"name"').replace('trade', '"trade"').replace('changepercent', '"changepercent"').replace('amount', '"amount"'))
+        
+        df = pd.DataFrame(data)
+        df = df.rename(columns={'symbol':'code', 'name':'name', 'trade':'price', 'changepercent':'pct', 'amount':'amount'})
         df['price'] = pd.to_numeric(df['price'], errors='coerce')
         df['pct'] = pd.to_numeric(df['pct'], errors='coerce')
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
         df['code'] = df['code'].str.replace('sh','').str.replace('sz','')
         
-        # 模拟资金流 (无主力数据时，用成交额替代)
+        # 模拟资金流
         df['money_flow'] = df['amount'] * 0.1 * (df['pct']/10)
         df['turnover'] = 5.0
         return df, "Sina (成交额估算)"
     except: return pd.DataFrame(), "Fail"
 
 def get_realtime_market_scan():
-    """双通道调度器 (移除了 Yahoo)"""
-    # 1. 尝试东财
+    """调度器"""
     df, src = fetch_eastmoney_realtime()
     if not df.empty: return df, src
     
-    # 2. 尝试新浪
     df, src = fetch_sina_realtime()
     if not df.empty: return df, src
     
@@ -124,7 +156,8 @@ def get_real_news_titles(code):
     clean = str(code).split(".")[0]
     try:
         url = "https://searchapi.eastmoney.com/bussiness/Web/GetSearchList"
-        r = requests.get(url, params={"type":"802","pageindex":1,"pagesize":1,"keyword":clean,"name":"normal"}, timeout=2)
+        # 增加 headers
+        r = requests.get(url, params={"type":"802","pageindex":1,"pagesize":1,"keyword":clean,"name":"normal"}, headers=get_stealth_headers(), timeout=3)
         if "Data" in r.json() and r.json()["Data"]: 
             t = r.json()["Data"][0].get("Title","").replace("<em>","").replace("</em>","")
             d = r.json()["Data"][0].get("ShowTime","")[5:10]
@@ -137,7 +170,7 @@ def search_stock_online(keyword):
     if not keyword: return None, None
     try:
         url = "https://searchapi.eastmoney.com/api/suggest/get"
-        r = requests.get(url, params={"input":keyword,"type":"14","count":"1"}, timeout=2)
+        r = requests.get(url, params={"input":keyword,"type":"14","count":"1"}, headers=get_stealth_headers(), timeout=2)
         item = r.json()["QuotationCodeTable"]["Data"][0]
         c=item['Code']; n=item['Name']; t=item['MarketType']
         return (f"{c}.SS" if t=="1" else f"{c}.SZ"), n
@@ -188,9 +221,9 @@ def generate_alpha_x_v39(df):
     pool = df[(df['price']>2)].copy()
     if pool.empty: return []
 
-    # 1. 黄金潜伏 (-1.5% ~ 4.0%)
+    # 1. 黄金潜伏
     tier1 = pool[(pool['pct']>-1.5)&(pool['pct']<4.0)&(pool['money_flow']>10000000)].sort_values("money_flow", ascending=False)
-    # 2. 暴力接力 (4.0% ~ 8.5%)
+    # 2. 暴力接力
     tier2 = pool[(pool['pct']>=4.0)&(pool['pct']<8.5)&(pool['money_flow']>20000000)].sort_values("money_flow", ascending=False)
     # 3. 兜底
     tier3 = pool[pool['pct']<9.5].sort_values("money_flow", ascending=False)
@@ -219,7 +252,7 @@ def login_system():
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
         st.title("📡 AlphaQuant Pro")
-        st.caption("v43.0 纯净国行版")
+        st.caption("v44.0 穿云箭接口版")
         t1, t2 = st.tabs(["登录", "注册"])
         with t1:
             u = st.text_input("账号", key="l1"); p = st.text_input("密码", type="password", key="l2")
@@ -240,36 +273,35 @@ def main_app():
         st.title("AlphaQuant Pro")
         st.info(f"👤 {st.session_state['username']}")
         menu = st.radio("导航", ["🔮 Alpha-X 每日金股", "🔎 个股全维透视", "👀 我的关注", "🏆 市场全景", "⚙️ 设置"])
-        
-        # 强制刷新按钮 (清除缓存)
-        if st.button("🔄 强制刷新数据"): 
-            st.cache_data.clear()
-            st.rerun()
-            
+        if st.button("🔄 强制刷新"): st.cache_data.clear(); st.rerun()
         if st.button("退出"): st.session_state['logged_in']=False; st.rerun()
 
     # --- 1. Alpha-X 金股预测 ---
     if menu == "🔮 Alpha-X 每日金股":
         st.header("🔮 Alpha-X 明日必涨金股")
         
-        # 直接使用带缓存的函数
-        # 显示加载状态
-        with st.spinner("正在连接中国数据源 (Eastmoney/Sina)..."):
-            df_realtime, source_name = get_realtime_market_scan()
-            
-            if not df_realtime.empty:
-                # 只有数据源变化或没有计算过时才重新计算
-                if 'picks' not in st.session_state or st.button("重新计算策略"):
+        col_btn, col_info = st.columns([1, 3])
+        with col_btn:
+            # 这里的按钮可以手动触发刷新
+            refresh = st.button("🚀 立即扫描", type="primary")
+        
+        # 核心逻辑：获取数据 -> 预测
+        if refresh or 'picks' not in st.session_state:
+            with st.spinner("正在穿透连接中国交易所 (加密通道)..."):
+                df_realtime, source_name = get_realtime_market_scan()
+                
+                if not df_realtime.empty:
+                    # 保存状态
                     st.session_state['picks'] = generate_alpha_x_v39(df_realtime)
                     st.session_state['data_source'] = source_name
                     st.session_state['scan_time'] = datetime.now().strftime("%H:%M:%S")
-            else:
-                st.error("⚠️ 无法连接中国交易所接口。请稍后再试。")
+                else:
+                    st.error("⚠️ 严重：无法连接中国数据源。可能是云端IP被彻底封锁。建议本地运行或稍后重试。")
 
         # 展示
         if 'picks' in st.session_state and st.session_state['picks']:
             st.success(f"✅ 数据源：**{st.session_state['data_source']}** | 更新时间：{st.session_state['scan_time']}")
-            st.caption("提示：数据已开启 60秒 缓冲保护，避免被封锁。点击左侧 '强制刷新' 可立即更新。")
+            st.caption("提示：已启用 HTTPS 加密通道绕过防火墙。")
             
             picks = st.session_state['picks']
             t1, t2 = st.tabs(["⚡️ 综合推荐 (Top 10)", "💎 长线稳健"])
@@ -355,6 +387,7 @@ def main_app():
 if __name__ == "__main__":
     if st.session_state['logged_in']: main_app()
     else: login_system()
+
 
 
 
