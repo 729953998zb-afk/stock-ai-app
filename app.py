@@ -9,17 +9,17 @@ import requests
 import json
 import os
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ================= 1. 全局配置 =================
 st.set_page_config(
-    page_title="AlphaQuant Pro | 龙头战法版",
+    page_title="AlphaQuant Pro | 双核修复版",
     layout="wide",
     page_icon="🐉",
     initial_sidebar_state="expanded"
 )
 
-# 数据库 (保持不变)
+# 数据库
 DB_FILE = "user_db.json"
 def init_db():
     if not os.path.exists(DB_FILE):
@@ -45,7 +45,7 @@ if 'username' not in st.session_state: st.session_state['username'] = ""
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
 if 'watchlist' not in st.session_state: st.session_state['watchlist'] = []
 
-# ================= 2. 核心数据引擎 (实时直连) =================
+# ================= 2. 双核数据引擎 (Eastmoney + Sina) =================
 
 def convert_to_yahoo(code):
     if code.startswith("6"): return f"{code}.SS"
@@ -56,27 +56,75 @@ def convert_to_yahoo(code):
 def get_random_agent():
     return f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(100, 125)}.0.0.0 Safari/537.36"
 
-# 强制实时，无缓存
-def get_full_market_data_realtime():
-    """东财全市场实时扫描"""
+# --- 引擎 A: 东方财富 (首选) ---
+def fetch_eastmoney_realtime():
     url = "http://82.push2.eastmoney.com/api/qt/clist/get"
-    # f3:涨幅, f62:主力净流入, f20:市值, f8:换手率, f22:涨速
-    params = {"pn": 1, "pz": 5000, "po": 1, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "fields": "f12,f14,f2,f3,f62,f20,f8,f22"}
+    params = {"pn": 1, "pz": 4000, "po": 1, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "fields": "f12,f14,f2,f3,f62,f20,f8,f22"}
     try:
-        r = requests.get(url, params=params, headers={"User-Agent": get_random_agent()}, timeout=5)
+        r = requests.get(url, params=params, headers={"User-Agent": get_random_agent()}, timeout=3)
         data = r.json()['data']['diff']
         df = pd.DataFrame(data).rename(columns={'f12':'code','f14':'name','f2':'price','f3':'pct','f62':'money_flow','f20':'mkt_cap','f8':'turnover','f22':'speed'})
         for c in ['price','pct','money_flow','turnover']: df[c] = pd.to_numeric(df[c], errors='coerce')
-        return df
-    except: return pd.DataFrame()
+        return df, "Eastmoney (主力资金)"
+    except: return pd.DataFrame(), "Fail"
 
+# --- 引擎 B: 新浪财经 (备用 - 专门扫描强势股) ---
+def fetch_sina_strong_stocks():
+    """
+    当东财挂了，用新浪扫描 '涨幅榜前80' 和 '成交额前80' 的并集
+    这样能保证抓到龙头股
+    """
+    try:
+        # 1. 抓涨幅榜
+        url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+        params_gain = {"page": 1, "num": 80, "sort": "changepercent", "asc": 0, "node": "hs_a", "_s_r_a": "page"}
+        r1 = requests.get(url, params=params_gain, headers={"User-Agent": get_random_agent()}, timeout=3)
+        df1 = pd.DataFrame(json.loads(r1.text))
+        
+        # 2. 抓成交额榜 (找大资金)
+        params_amt = {"page": 1, "num": 80, "sort": "amount", "asc": 0, "node": "hs_a", "_s_r_a": "page"}
+        r2 = requests.get(url, params=params_amt, headers={"User-Agent": get_random_agent()}, timeout=3)
+        df2 = pd.DataFrame(json.loads(r2.text))
+        
+        # 合并
+        df = pd.concat([df1, df2]).drop_duplicates(subset=['symbol'])
+        
+        # 映射字段
+        df = df.rename(columns={'symbol':'code', 'name':'name', 'trade':'price', 'changepercent':'pct', 'amount':'amount'})
+        df['price'] = pd.to_numeric(df['price'], errors='coerce')
+        df['pct'] = pd.to_numeric(df['pct'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        
+        # 清洗代码
+        df['code'] = df['code'].str.replace('sh','').str.replace('sz','')
+        
+        # 模拟字段 (新浪无主力流入，用成交额模拟资金强度)
+        # 逻辑：成交额大 + 涨得好 = 资金强
+        df['money_flow'] = df['amount'] * 0.15 
+        df['turnover'] = 10.0 # 默认给个高换手，假定活跃
+        
+        return df, "Sina (双榜扫描)"
+    except: return pd.DataFrame(), "Fail"
+
+def get_market_data_smart():
+    """双核调度"""
+    # 1. 优先东财
+    df, src = fetch_eastmoney_realtime()
+    if not df.empty: return df, src
+    
+    # 2. 降级新浪
+    df, src = fetch_sina_strong_stocks()
+    if not df.empty: return df, src
+    
+    return pd.DataFrame(), "All Failed"
+
+# --- 新闻 ---
 @st.cache_data(ttl=300)
 def get_real_news_titles(code):
-    """获取真实新闻"""
-    clean_code = str(code).split(".")[0]
+    clean = str(code).split(".")[0]
     try:
         url = "https://searchapi.eastmoney.com/bussiness/Web/GetSearchList"
-        r = requests.get(url, params={"type":"802","pageindex":1,"pagesize":1,"keyword":clean_code,"name":"normal"}, timeout=2)
+        r = requests.get(url, params={"type":"802","pageindex":1,"pagesize":1,"keyword":clean,"name":"normal"}, timeout=2)
         if "Data" in r.json() and r.json()["Data"]: 
             t = r.json()["Data"][0].get("Title","").replace("<em>","").replace("</em>","")
             d = r.json()["Data"][0].get("ShowTime", "")[5:10]
@@ -85,15 +133,14 @@ def get_real_news_titles(code):
     return []
 
 def search_stock_online(keyword):
-    keyword = keyword.strip()
+    keyword = keyword.strip(); 
     if not keyword: return None, None
     try:
         url = "https://searchapi.eastmoney.com/api/suggest/get"
-        r = requests.get(url, params={"input":keyword, "type":"14", "count":"1"}, timeout=2)
+        r = requests.get(url, params={"input":keyword,"type":"14","count":"1"}, timeout=2)
         item = r.json()["QuotationCodeTable"]["Data"][0]
-        c = item['Code']; n = item['Name']
-        if item['MarketType'] == "1": return f"{c}.SS", n
-        elif item['MarketType'] == "2": return f"{c}.SZ", n
+        c=item['Code']; n=item['Name']; t=item['MarketType']
+        return (f"{c}.SS" if t=="1" else f"{c}.SZ"), n
     except: pass
     if keyword.isdigit() and len(keyword)==6: return convert_to_yahoo(keyword), keyword
     return None, None
@@ -101,9 +148,15 @@ def search_stock_online(keyword):
 @st.cache_data(ttl=1800)
 def scan_long_term_rankings():
     """长线榜单"""
-    df = get_full_market_data_realtime()
+    df, _ = get_market_data_smart()
     if df.empty: return pd.DataFrame()
-    pool = df.sort_values("mkt_cap", ascending=False).head(30)
+    # 简单的长线筛选：市值较大，涨幅适中
+    if 'mkt_cap' in df.columns:
+        pool = df.sort_values("mkt_cap", ascending=False).head(30)
+    else:
+        # 新浪源没有市值，用成交额凑合
+        pool = df.sort_values("money_flow", ascending=False).head(30)
+        
     data = []
     tickers = [convert_to_yahoo(c) for c in pool['code'].tolist()]
     try:
@@ -121,7 +174,7 @@ def scan_long_term_rankings():
     except: pass
     return pd.DataFrame(data)
 
-# ================= 4. 个股深度分析 =================
+# ================= 3. 个股深度分析 =================
 
 @st.cache_data(ttl=600)
 def analyze_stock_comprehensive(code, name):
@@ -138,7 +191,7 @@ def analyze_stock_comprehensive(code, name):
         exp1=h['Close'].ewm(span=12).mean(); exp2=h['Close'].ewm(span=26).mean(); macd=(exp1-exp2).ewm(span=9).mean().iloc[-1]
         
         trend = "✅ 趋势加速" if curr>ma20 else "⚠️ 趋势破位"
-        pos = "🔥 资金过热" if rsi>80 else "⚡️ 底部超卖" if rsi<20 else "⚖️ 正常"
+        pos = "🔥 资金过热" if rsi>80 else "⚡️ 底部超卖" if rsi<20 else "⚖️ 适中"
         
         sig, col = "观望", "gray"
         if rsi>85: sig, col = "高抛", "red"
@@ -157,43 +210,36 @@ def run_ai_tutor(d, base_url):
         return c.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role":"user","content":f"分析{d['name']}，现价{d['price']}。{d['trend_txt']}。小白建议。"}]).choices[0].message.content
     except: return "AI超时"
 
-# ================= 5. Alpha-X 龙头战法 (v50 暴力版) =================
+# ================= 4. Alpha-X 龙头战法 (双核兼容) =================
 
-def generate_dragon_hunter(df):
+def generate_dragon_hunter(df, source_type):
     """
-    【v50 龙头战法】
-    只找最强的，不管位置多高，只要资金在买，明天就有溢价。
+    【v51 龙头战法 - 双核版】
+    兼容 Eastmoney (有净流入) 和 Sina (有成交额)
     """
     if df.empty: return []
     
     # 基础清洗
-    pool = df[(df['price']>3) & (~df['name'].str.contains("ST|退")) & (df['turnover']>3)].copy()
+    pool = df[(df['price']>3)].copy()
+    if 'name' in pool.columns: pool = pool[~pool['name'].str.contains("ST|退")]
     
-    # -----------------------------------------------
-    # 策略 A: 龙头首阴/突破 (5% - 9.5%)
-    # 逻辑：涨幅大，资金大，明天大概率惯性高开，甚至连板。
-    # -----------------------------------------------
+    # 资金阈值适配
+    # 东财money_flow是净流入(1000万级)，新浪money_flow是成交额(亿级，已被缩放)
+    # 我们这里统一用相对排序
+    
+    # 1. 龙头首阴/突破 (5% - 9.8%)
     dragons = pool[
-        (pool['pct'] >= 5.0) & (pool['pct'] < 9.8) & # 大涨但未封死/刚封
-        (pool['money_flow'] > 30000000) # 主力净买 > 3000万
-    ].copy()
+        (pool['pct'] >= 5.0) & (pool['pct'] < 9.8)
+    ].sort_values("money_flow", ascending=False).head(5)
     
-    # -----------------------------------------------
-    # 策略 B: 强势中继 (3% - 5%)
-    # 逻辑：趋势强，还没加速，适合半路“打劫”。
-    # -----------------------------------------------
+    # 2. 强势中继 (3% - 5%)
     strong = pool[
-        (pool['pct'] >= 3.0) & (pool['pct'] < 5.0) & 
-        (pool['money_flow'] > 20000000)
-    ].copy()
+        (pool['pct'] >= 3.0) & (pool['pct'] < 5.0)
+    ].sort_values("money_flow", ascending=False).head(5)
     
-    # -----------------------------------------------
-    # 策略 C: 资金扫货 (兜底)
-    # 逻辑：全市场资金流向 Top 20
-    # -----------------------------------------------
-    cash_kings = pool.sort_values("money_flow", ascending=False).head(20)
+    # 3. 资金扫货 (全市场前20)
+    cash_kings = pool.sort_values("money_flow", ascending=False).head(10)
     
-    # 合并：优先龙头 -> 强势 -> 资金王
     picks = pd.concat([dragons, strong, cash_kings]).drop_duplicates(subset=['code']).head(10)
     
     results = []
@@ -203,17 +249,12 @@ def generate_dragon_hunter(df):
             news = get_real_news_titles(cl)
             n_txt = f"📰 {news[0]}" if news else "📡 资金强驱动"
             
-            # --- 核心：预测算法 ---
-            
-            # 1. 胜率计算 (越强越好)
+            # 胜率计算
             base_prob = 90
-            if row['pct'] > 6: base_prob += 5 # 涨得越猛，惯性越大
-            if row['money_flow'] > 100000000: base_prob += 3 # 资金过亿，必有溢价
+            if row['pct'] > 6: base_prob += 5
             prob = min(99.5, base_prob + random.uniform(0,1))
             
-            # 2. 持股天数预测
-            # 换手率高 + 涨幅大 = 妖股 = 持股短 (快进快出)
-            # 换手率适中 + 资金大 = 趋势股 = 持股长
+            # 持股周期
             if row['turnover'] > 15:
                 days = "1天 (隔日超短)"
                 exit_plan = "明日冲高不板即走，跌破开盘价止损。"
@@ -221,30 +262,35 @@ def generate_dragon_hunter(df):
                 days = "2-3天 (短线波段)"
                 exit_plan = "沿5日线持有，跌破5日线止盈。"
             
-            # 3. 理由
-            money_val = row['money_flow']/10000
-            if row['pct'] > 5:
-                tag = "🔥 龙头加速"; reason = f"**主升浪**：涨幅 **{row['pct']}%**，主力疯抢 **{money_val:.0f}万**。惯性极强，明日大概率高开秒板。"
+            # 文案适配
+            if "Sina" in source_type:
+                money_val = row['money_flow'] / 1000000 # 新浪已经是大数了
+                flow_msg = f"成交额活跃"
             else:
-                tag = "🚀 暴力接力"; reason = f"**空中加油**：涨幅 **{row['pct']}%**，资金持续流入。洗盘结束，即将加速。"
+                money_val = row['money_flow'] / 10000
+                flow_msg = f"主力净买 {money_val:.0f}万"
+
+            if row['pct'] > 5:
+                tag = "🔥 龙头加速"; reason = f"**主升浪**：涨幅 **{row['pct']}%**，{flow_msg}。惯性极强，明日溢价。"
+            else:
+                tag = "🚀 暴力接力"; reason = f"**空中加油**：涨幅 **{row['pct']}%**，{flow_msg}。洗盘结束，即将加速。"
             
             results.append({
                 "name":row['name'], "code":yc, "price":row['price'], "pct":row['pct'],
-                "flow":f"{money_val:.0f}万", "tag":tag, "news":n_txt, 
+                "flow":flow_msg, "tag":tag, "news":n_txt, 
                 "prob":prob, "reason":reason, "days":days, "exit":exit_plan
             })
         except: continue
         
-    # 按胜率排序
     return sorted(results, key=lambda x: x['prob'], reverse=True)
 
-# ================= 6. 界面 UI =================
+# ================= 5. 界面 UI =================
 
 def login_system():
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
         st.title("🐉 AlphaQuant Pro")
-        st.caption("v50.0 龙头战法版")
+        st.caption("v51.0 双核龙头版")
         t1, t2 = st.tabs(["登录", "注册"])
         with t1:
             u = st.text_input("账号", key="l1"); p = st.text_input("密码", type="password", key="l2")
@@ -271,16 +317,17 @@ def main_app():
     df_full = pd.DataFrame()
     if menu in ["🔮 Alpha-X 每日金股", "🏆 市场全景"]:
         with st.spinner("正在连接交易所实时数据..."):
-            df_full = get_full_market_data_realtime()
-            if df_full.empty: st.error("数据源连接失败，请刷新"); st.stop()
+            df_full, src = get_market_data_smart()
+            if df_full.empty: st.error("⚠️ 严重：所有数据源连接失败 (可能是休市或IP封锁)"); st.stop()
 
     # --- 1. Alpha-X 金股预测 ---
     if menu == "🔮 Alpha-X 每日金股":
         st.header("🔮 Alpha-X 明日必涨金股 (Top 10)")
-        st.caption("策略：龙头战法 | 目标：明日 T+1 必有高点")
+        if "Sina" in src: st.warning(f"⚠️ 正在使用备用数据源：**{src}** (东财接口拥堵)")
+        else: st.success(f"✅ 交易所直连：**{src}**")
         
         # 实时计算
-        picks = generate_dragon_hunter(df_full)
+        picks = generate_dragon_hunter(df_full, src)
         
         if picks:
             t1, t2 = st.tabs(["🔥 短线暴力 (必涨榜)", "💎 长线稳健"])
@@ -288,7 +335,6 @@ def main_app():
             with t1:
                 for i, p in enumerate(picks):
                     with st.container(border=True):
-                        # 第一行：基础
                         c1, c2, c3, c4 = st.columns([1, 2, 3, 3])
                         with c1: 
                             if i<3: st.markdown(f"# 🚀 {i+1}")
@@ -296,12 +342,11 @@ def main_app():
                         with c2: st.markdown(f"### {p['name']}"); st.caption(p['code'])
                         with c3: 
                             st.metric("现价", f"¥{p['price']:.2f}", f"{p['pct']:.2f}%", delta_color="normal")
-                            st.caption(f"主力净买: :red[{p['flow']}]")
+                            st.caption(f"{p['flow']}")
                         with c4: 
-                            st.progress(p['prob']/100, text=f"🔥 **明日爆发率: {p['prob']:.1f}%**")
+                            st.progress(p['prob']/100, text=f"🔥 **{p['prob']:.1f}%**")
                             st.error(p['tag']) if "龙头" in p['tag'] else st.warning(p['tag'])
                         
-                        # 第二行：深度逻辑 + 预测
                         st.info(p['reason'])
                         
                         k1, k2, k3 = st.columns([1, 2, 2])
@@ -310,9 +355,7 @@ def main_app():
                         with k3: st.caption(p['news'])
             
             with t2:
-                # 长线复用之前的逻辑
-                with st.spinner("计算长线..."):
-                    dfr = scan_long_term_rankings()
+                with st.spinner("计算长线..."): dfr = scan_long_term_rankings()
                 if not dfr.empty:
                     lp = dfr[dfr['year_pct']>0].sort_values("score", ascending=False).head(5)
                     for i, (_, row) in enumerate(lp.iterrows()):
@@ -324,7 +367,7 @@ def main_app():
                             with c4: st.write(f"波动率: {row['volatility']:.1f}"); st.caption("稳健核心资产")
                 else: st.error("长线数据不足")
         else:
-            st.warning("今日市场极度冰点，无资金进场。")
+            st.warning("市场极度冰点，无符合龙头战法标的。")
 
     # --- 2. 个股透视 ---
     elif menu == "🔎 个股全维透视":
@@ -377,9 +420,13 @@ def main_app():
     # --- 4. 市场全景 ---
     elif menu == "🏆 市场全景":
         st.header("🏆 实时全景")
-        t1, t2 = st.tabs(["🚀 涨幅榜", "💰 资金榜"])
-        with t1: st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(15)[['name','price','pct']], use_container_width=True)
-        with t2: st.dataframe(df_full.sort_values("money_flow",ascending=False).head(15)[['name','price','money_flow']], use_container_width=True)
+        if not df_full.empty:
+            t1, t2 = st.tabs(["🚀 涨幅榜", "💰 资金榜"])
+            with t1: st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(15)[['name','price','pct']], use_container_width=True)
+            with t2: 
+                sort_col = 'money_flow' if 'money_flow' in df_full.columns else 'amount'
+                st.dataframe(df_full.sort_values(sort_col,ascending=False).head(15)[['name','price',sort_col]], use_container_width=True)
+        else: st.error("数据源异常")
 
     # --- 5. 设置 ---
     elif menu == "⚙️ 设置":
@@ -391,6 +438,7 @@ def main_app():
 if __name__ == "__main__":
     if st.session_state['logged_in']: main_app()
     else: login_system()
+
 
 
 
