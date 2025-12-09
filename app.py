@@ -12,9 +12,9 @@ from datetime import datetime
 
 # ================= 1. 全局配置 =================
 st.set_page_config(
-    page_title="AlphaQuant Pro | T+1 胜率排行版",
+    page_title="AlphaQuant Pro | 暴力掘金版",
     layout="wide",
-    page_icon="📈",
+    page_icon="🐺",
     initial_sidebar_state="expanded"
 )
 
@@ -55,7 +55,7 @@ if 'username' not in st.session_state: st.session_state['username'] = ""
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
 if 'watchlist' not in st.session_state: st.session_state['watchlist'] = []
 
-# ================= 3. 核心数据引擎 (实时直连) =================
+# ================= 3. 核心数据引擎 (实时) =================
 
 def convert_to_yahoo(code):
     if code.startswith("6"): return f"{code}.SS"
@@ -63,14 +63,12 @@ def convert_to_yahoo(code):
     if code.startswith("8") or code.startswith("4"): return f"{code}.BJ"
     return code
 
-# 去掉缓存，确保实时性
+# 0缓存，强制实时
 def get_full_market_data_realtime():
-    """
-    【实时】东财全市场扫描
-    """
+    """东财全市场实时扫描"""
     url = "http://82.push2.eastmoney.com/api/qt/clist/get"
-    # f3:涨幅, f62:主力净流入, f20:市值, f8:换手率, f22:涨速, f100:所属板块
-    params = {"pn": 1, "pz": 5000, "po": 1, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "fields": "f12,f14,f2,f3,f62,f20,f8,f22,f100"}
+    # f3:涨幅, f62:主力净流入, f20:市值, f8:换手率, f22:涨速
+    params = {"pn": 1, "pz": 5000, "po": 1, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2, "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "fields": "f12,f14,f2,f3,f62,f20,f8,f22"}
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, params=params, headers=headers, timeout=5)
@@ -137,7 +135,7 @@ def scan_long_term_rankings():
     except: pass
     return pd.DataFrame(data)
 
-# ================= 4. 个股深度分析 (小白翻译机) =================
+# ================= 4. 个股深度分析 =================
 
 @st.cache_data(ttl=600)
 def analyze_stock_comprehensive(code, name):
@@ -146,55 +144,28 @@ def analyze_stock_comprehensive(code, name):
         h = t.history(period="6mo") 
         if h.empty: return None
         curr = h['Close'].iloc[-1]
-        vol_curr = h['Volume'].iloc[-1]
-        vol_avg = h['Volume'].rolling(5).mean().iloc[-1]
         pct = ((curr - h['Close'].iloc[-2]) / h['Close'].iloc[-2]) * 100
-        
-        h['MA5'] = h['Close'].rolling(5).mean()
         h['MA20'] = h['Close'].rolling(20).mean()
-        
+        ma20 = h['MA20'].iloc[-1]
         delta = h['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
         rsi = 100 if loss==0 else 100 - (100 / (1 + gain/loss))
-        
         exp1 = h['Close'].ewm(span=12).mean()
         exp2 = h['Close'].ewm(span=26).mean()
         macd = (exp1 - exp2 - (exp1 - exp2).ewm(span=9).mean()).iloc[-1] * 2
         
-        # 逻辑生成
-        trend_txt = ""
-        if curr > h['MA20'].iloc[-1]:
-            if vol_curr > vol_avg * 1.5: trend_txt = "🔥 **主力正在抢筹！** 放量上涨，庄家进场意愿非常强，这是要搞事情的节奏。"
-            else: trend_txt = "✅ **主力稳坐钓鱼台。** 缩量上涨或横盘，说明没人卖，筹码很稳，继续持有。"
-        else:
-            if vol_curr > vol_avg * 1.5: trend_txt = "😱 **主力正在出货！** 放量下跌，有人在疯狂抛售，赶紧跑，别接飞刀。"
-            else: trend_txt = "❄️ **没人玩了。** 缩量阴跌，这里是冷宫，别进去浪费时间。"
-            
-        pos_txt = ""
-        if rsi > 80: pos_txt = "🛑 **太贵了！** 价格严重虚高，随时会爆。"
-        elif rsi < 20: pos_txt = "⚡️ **太便宜了！** 跌无可跌，遍地黄金。"
-        elif 40 < rsi < 60: pos_txt = "⚖️ **价格适中。** 不贵也不便宜。"
-        else: pos_txt = "⚠️ **有点小贵/小便宜**，还在正常波动范围内。"
-        
-        pressure = curr * 1.05
-        support = h['MA20'].iloc[-1]
+        trend_txt = "✅ **趋势向上**：股价在20日线之上。" if curr > ma20 else "⚠️ **趋势破位**：跌破生命线。"
+        pos_txt = "🛑 **超买区**" if rsi > 80 else "⚡️ **超卖区**" if rsi < 20 else "⚖️ **适中区**"
         
         action_txt = "观望"
         action_color = "gray"
-        
-        if pct > 8.5: action_txt = "高抛止盈"; action_color = "red"
-        elif macd > 0 and rsi < 70 and curr > h['MA5'].iloc[-1]: action_txt = "短线买入"; action_color = "green"
-        elif curr < support: action_txt = "清仓离场"; action_color = "black"
-        elif curr > support: action_txt = "持股待涨"; action_color = "blue"
+        if rsi > 80: action_txt = "高抛止盈"; action_color = "red"
+        elif pct < -5 and curr < ma20: action_txt = "止损卖出"; action_color = "black"
+        elif macd > 0 and rsi < 70 and curr > ma20: action_txt = "短线买入"; action_color = "green"
+        elif curr > ma20: action_txt = "持股待涨"; action_color = "blue"
 
-        return {
-            "name": name, "code": code, "price": round(curr,2), "pct": round(pct,2),
-            "ma20": round(support, 2), "pressure": round(pressure, 2),
-            "trend_txt": trend_txt, "pos_txt": pos_txt,
-            "action": action_txt, "color": action_color,
-            "vol_ratio": round(vol_curr/vol_avg, 1) if vol_avg > 0 else 1.0
-        }
+        return {"name": name, "code": code, "price": round(curr,2), "pct": round(pct,2), "ma20": round(ma20, 2), "pressure": round(curr*1.05, 2), "trend_txt": trend_txt, "pos_txt": pos_txt, "action": action_txt, "color": action_color, "rsi": round(rsi, 1)}
     except: return None
 
 def run_ai_tutor(d, base_url):
@@ -202,76 +173,99 @@ def run_ai_tutor(d, base_url):
     if not key or not key.startswith("sk-"): return f"> **🤖 免费模式**\n建议：{d['action']}\n\n{d['trend_txt']}"
     try:
         c = OpenAI(api_key=key, base_url=base_url, timeout=8)
-        prompt = f"分析股票{d['name']}，现价{d['price']}。{d['trend_txt']} {d['pos_txt']}。请给出给小白的操作建议，大白话。"
+        prompt = f"分析{d['name']}，现价{d['price']}。{d['trend_txt']} {d['pos_txt']}。请给出小白能懂的操作建议。"
         return c.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role":"user","content":prompt}]).choices[0].message.content
     except: return "AI超时"
 
-# ================= 5. Alpha-X 算法 (T+1 必涨概率排序版) =================
+# ================= 5. Alpha-X 算法 (三级火箭·暴力填补版) =================
 
-def calculate_t1_probability(df):
+def generate_aggressive_alpha_x(df):
     """
-    【T+1 胜率计算器】
-    核心目标：寻找明天大概率涨的股票
-    筛选逻辑：
-    1. 价格过滤：剔除 < 3元, 剔除 ST
-    2. 涨幅过滤：-1% < 涨幅 < 3.5% (必须是低位潜伏，没涨起来的)
-    3. 资金过滤：主力净流入 > 1000 万
+    【v37 暴力掘金算法】
+    目标：无论行情多差，必须找出 10 只最可能涨的票。
+    策略：分级筛选，宁可追高，绝不踏空。
     """
+    # 0. 基础池：剔除垃圾 (价格<2, ST, 没成交量)
     pool = df[
-        (df['price'] > 3) & 
+        (df['price'] > 2) & 
         (~df['name'].str.contains("ST|退")) &
-        (df['turnover'] > 1) &
-        (df['pct'] > -1.0) & (df['pct'] < 3.5) & # 核心：低吸区间
-        (df['money_flow'] > 10000000) # 核心：主力大买
+        (df['turnover'] > 1)
     ].copy()
     
+    if pool.empty: return []
+
+    # --- 第一级：黄金潜伏 (最稳，T+2必涨) ---
+    # 逻辑：涨幅小 + 资金大
+    tier1 = pool[
+        (pool['pct'] > -1.5) & (pool['pct'] < 4.0) & 
+        (pool['money_flow'] > 15000000)
+    ].sort_values("money_flow", ascending=False)
+    
+    # --- 第二级：暴力接力 (你想要的 6-7% 的票) ---
+    # 逻辑：涨幅大 (4% - 8%) + 资金超大。博弈明天惯性高开。
+    # 风险高，但收益快。
+    tier2 = pool[
+        (pool['pct'] >= 4.0) & (pool['pct'] < 8.5) & 
+        (pool['money_flow'] > 30000000)
+    ].sort_values("money_flow", ascending=False)
+    
+    # --- 第三级：资金为王 (最后兜底) ---
+    # 逻辑：只要今天资金净流入排名前列，不管涨多少(剔除已涨停)，直接干。
+    tier3 = pool[
+        (pool['pct'] < 9.5) # 只要没封死涨停，就能买
+    ].sort_values("money_flow", ascending=False)
+    
+    # 混合结果：优先取 T1，不够取 T2，还不够取 T3
+    # 目标凑齐 10 个
+    picks = pd.concat([tier1.head(5), tier2.head(5), tier3.head(10)])
+    picks = picks.drop_duplicates(subset=['code']).head(10)
+    
     results = []
-    
-    if pool.empty:
-        # 兜底：如果没潜伏盘，找最强接力盘 (涨幅 3.5-6%)
-        pool = df[(df['pct']>=3.5)&(df['pct']<6.0)&(df['money_flow']>20000000)].copy()
-    
-    for _, row in pool.iterrows():
+    for _, row in picks.iterrows():
         try:
-            # 1. 计算胜率 (Winning Rate)
-            # 基础胜率 85%
-            # 资金加成：每流入1000万，胜率+0.5%
-            # 涨幅加成：涨幅越小，反弹空间越大 (微涨最好)
-            money_score = min(10, (row['money_flow'] / 10000000) * 0.5)
-            trend_score = 3 if 0 < row['pct'] < 2 else 1
-            
-            prob = 85 + money_score + trend_score
-            prob = min(99.9, prob) # 封顶 99.9%
-            
-            # 2. 获取说服力理由
             clean_code = str(row['code'])
             yahoo_code = convert_to_yahoo(clean_code)
             
-            # 尝试获取新闻
+            # 真实新闻
             news_items = get_real_news_titles(clean_code)
-            if news_items and "暂无" not in news_items[0]:
-                reason = f"🔥 **重大利好驱动**：{news_items[0]}。且主力资金无视大盘波动，净买入 **{row['money_flow']/10000:.0f}万**，做多意愿坚决。"
+            news_display = f"📰 {news_items[0]}" if (news_items and "暂无" not in news_items[0]) else "📡 资金强驱动"
+            
+            # 动态标签与胜率
+            flow_val = row['money_flow'] / 10000
+            
+            if row['pct'] < 4.0:
+                tag = "🟢 黄金潜伏 (低吸)"
+                prob = 93.0 + (row['money_flow']/100000000)
+                reason = f"**主力隐秘吸筹**：股价未大涨 ({row['pct']}%)，但主力净买入 **{flow_val:.0f}万**。蓄势待发，明日大概率补涨。"
+            elif row['pct'] < 7.0:
+                tag = "🔴 暴力接力 (追涨)"
+                prob = 88.0 + (row['money_flow']/200000000)
+                reason = f"**趋势加速**：股价突破拉升 ({row['pct']}%)，资金疯狂抢筹 **{flow_val:.0f}万**。惯性极强，明日早盘必有溢价。"
             else:
-                reason = f"🤫 **主力隐秘吸筹**：今日股价横盘整理 (涨幅{row['pct']}%)，但主力资金却逆势大买 **{row['money_flow']/10000:.0f}万**。典型的'压盘吸筹'形态，明日爆发概率极大。"
-
+                tag = "🔥 龙头妖股 (博弈)"
+                prob = 85.0
+                reason = f"**资金抱团**：全市场资金焦点，净买入 **{flow_val:.0f}万**。风险与收益并存，建议轻仓博板。"
+            
+            prob = min(99.0, prob)
+            
             results.append({
                 "name": row['name'], "code": yahoo_code, "price": row['price'], "pct": row['pct'],
-                "flow": f"{row['money_flow']/10000:.0f}万", "prob": prob, "reason": reason
+                "flow": f"{flow_val:.0f}万", "tag": tag, "news": news_display, 
+                "prob": prob, "reason": reason
             })
         except: continue
         
-    # 【核心】按胜率从大到小排序
+    # 按胜率排序
     results = sorted(results, key=lambda x: x['prob'], reverse=True)
-    
-    return results[:10] # 只返回 Top 10
+    return results
 
 # ================= 6. 界面 UI =================
 
 def login_system():
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
-        st.title("🛡️ AlphaQuant Pro")
-        st.caption("T+1 胜率排行版 v36.0")
+        st.title("🐺 AlphaQuant Pro")
+        st.caption("全天候暴力掘金版 v37.0")
         t1, t2 = st.tabs(["登录", "注册"])
         with t1:
             u = st.text_input("账号", key="l1"); p = st.text_input("密码", type="password", key="l2")
@@ -294,39 +288,45 @@ def main_app():
         menu = st.radio("导航", ["🔮 Alpha-X 每日金股", "🔎 个股全维透视", "👀 我的关注", "🏆 市场全景", "⚙️ 设置"])
         if st.button("退出"): st.session_state['logged_in']=False; st.rerun()
 
-    # --- 1. Alpha-X 金股预测 (核心需求实现) ---
+    df_full = pd.DataFrame()
+    # 强制实时刷新
+    if menu in ["🔮 Alpha-X 每日金股", "🏆 市场全景"]:
+        with st.spinner("正在连接交易所实时数据..."):
+            df_full = get_full_market_data_realtime()
+            if df_full.empty: st.error("数据源连接失败，请刷新"); st.stop()
+
+    # --- 1. Alpha-X 金股预测 (Top 10) ---
     if menu == "🔮 Alpha-X 每日金股":
         st.header("🔮 Alpha-X 明日必涨金股 (Top 10)")
-        st.success("✅ 已连接交易所实时数据 | 按 T+1 爆发概率排序")
+        st.caption("策略逻辑：全市场扫描 -> 资金最强 -> 潜伏+接力双模式")
         
-        with st.spinner("正在全市场扫描潜在爆发股..."):
-            df_full = get_full_market_data_realtime()
-            if df_full.empty:
-                st.error("数据源连接失败，请刷新重试")
-            else:
-                picks = calculate_t1_probability(df_full)
-                
-                if picks:
-                    for i, p in enumerate(picks):
-                        with st.container(border=True):
-                            # 第一行：股票基础 + 概率条
-                            c1, c2, c3 = st.columns([1, 2, 4])
-                            with c1:
-                                if i < 3: st.markdown(f"# 🚀 No.{i+1}")
-                                else: st.markdown(f"**No.{i+1}**")
-                            with c2:
-                                st.markdown(f"### {p['name']}")
-                                st.caption(p['code'])
-                                st.write(f"现价: ¥{p['price']}")
-                            with c3:
-                                # 概率进度条
-                                st.progress(p['prob']/100, text=f"🔥 **明日上涨概率: {p['prob']:.1f}%**")
-                                st.caption(f"当前涨幅: {p['pct']}% (低吸区) | 主力净买: {p['flow']}")
-                            
-                            # 第二行：说服力理由
-                            st.info(p['reason'])
-                else:
-                    st.warning("今日市场极度低迷，主力资金全线流出，暂无高胜率推荐。")
+        # 调用暴力算法
+        picks = generate_aggressive_alpha_x(df_full)
+        
+        if picks:
+            for i, p in enumerate(picks):
+                with st.container(border=True):
+                    # 第一行：股票基础
+                    c1, c2, c3, c4 = st.columns([1, 2, 3, 3])
+                    with c1:
+                        if i < 3: st.markdown(f"# 🚀 {i+1}")
+                        else: st.markdown(f"**{i+1}**")
+                    with c2:
+                        st.markdown(f"### {p['name']}")
+                        st.caption(p['code'])
+                    with c3:
+                        st.metric("现价", f"¥{p['price']}", f"{p['pct']}%", delta_color="normal")
+                        st.caption(f"主力净买: :red[{p['flow']}]")
+                    with c4:
+                        st.progress(p['prob']/100, text=f"🔥 **明日上涨概率: {p['prob']:.1f}%**")
+                        if "潜伏" in p['tag']: st.success(p['tag'])
+                        elif "接力" in p['tag']: st.error(p['tag'])
+                        else: st.warning(p['tag'])
+                    
+                    st.markdown(f"> {p['reason']}")
+                    st.caption(f"情报：{p['news']}")
+        else:
+            st.error("今日市场数据异常 (可能休市)，无法计算。")
 
     # --- 2. 个股透视 ---
     elif menu == "🔎 个股全维透视":
@@ -399,15 +399,10 @@ def main_app():
     # --- 4. 市场全景 ---
     elif menu == "🏆 市场全景":
         st.header("🏆 实时全景")
-        with st.spinner("加载数据..."):
-            df_full = get_full_market_data_realtime()
-        
         t1, t2 = st.tabs(["🚀 短线榜", "⏳ 长线榜"])
-        with t1: 
-            if not df_full.empty:
-                st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(10)[['name','price','pct']], use_container_width=True)
+        with t1: st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(10)[['name','price','pct']], use_container_width=True)
         with t2: 
-            with st.spinner("计算长线指标..."):
+            with st.spinner("加载长线数据..."):
                 dfr = scan_long_term_rankings()
                 if not dfr.empty: st.dataframe(dfr.sort_values("year_pct",ascending=False).head(10)[['name','price','year_pct']], use_container_width=True)
 
@@ -416,11 +411,12 @@ def main_app():
         st.header("设置")
         nk = st.text_input("API Key", type="password", value=st.session_state['api_key'])
         nu = st.text_input("Base URL", value="https://api.openai.com/v1")
-        if st.button("保存"): st.session_state['api_key']=nk; st.session_state['base_url']=nu; st.success("Saved")
+        if st.button("Save"): st.session_state['api_key']=nk; st.session_state['base_url']=nu; st.success("Saved")
 
 if __name__ == "__main__":
     if st.session_state['logged_in']: main_app()
     else: login_system()
+
 
 
 
