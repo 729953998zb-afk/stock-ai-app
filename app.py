@@ -82,17 +82,10 @@ def fetch_sina_data():
         params = {"page":1, "num":100, "sort":"amount", "asc":0, "node":"hs_a", "_s_r_a":"page"}
         r = requests.get(url, params=params, headers=get_headers(), timeout=4)
         
-        # 新浪返回的是非标准JSON (键名没引号)，需要手动解析
-        text = r.text
-        # 简单清洗: 将非标准json转为标准json (给key加上引号)
-        # 这里使用一种简化的处理方式，因为新浪数据结构相对固定
-        # 但最安全的方式是使用 json.loads 如果格式允许，或者 pandas read_json
-        # 鉴于新浪返回的是类似 [{symbol:"sz000...",...}] 的格式，直接 json.loads 会报错
-        # 我们用 eval 是最快的方法（仅用于受信任的 API）
-        # 为了安全，我们用简单的字符串替换
-        fixed_text = text.replace('symbol', '"symbol"').replace('code', '"code"').replace('name', '"name"').replace('trade', '"trade"').replace('pricechange', '"pricechange"').replace('changepercent', '"changepercent"').replace('buy', '"buy"').replace('sell', '"sell"').replace('settlement', '"settlement"').replace('open', '"open"').replace('high', '"high"').replace('low', '"low"').replace('volume', '"volume"').replace('amount', '"amount"')
-        
-        data = json.loads(fixed_text)
+        # 新浪返回的是非标准JSON (键名没引号)，需要手动解析或eval(极简处理)
+        # 这里使用 pandas read_json 的更安全方式，或者直接用 json.loads 如果格式标准
+        # 新浪返回标准 json 数组对象
+        data = json.loads(r.text)
         df = pd.DataFrame(data)
         
         # 映射: symbol, name, trade(现价), changepercent(涨幅), amount(成交额)
@@ -160,10 +153,7 @@ def generate_alpha_x_v41(df, source_type):
     source_type: 区分数据源，如果是 Sina，逻辑略有不同
     """
     # 基础清洗
-    pool = df[(df['price']>2)].copy()
-    if 'name' in pool.columns:
-        pool = pool[~pool['name'].str.contains("ST|退")]
-        
+    pool = df[(df['price']>2) & (~df['name'].str.contains("ST|退"))].copy()
     if pool.empty: return []
 
     # ----------------------------------------------------
@@ -383,6 +373,7 @@ def main_app():
             t1, t2 = st.tabs(["🚀 涨幅榜", "💰 资金/成交榜"])
             with t1: st.dataframe(df_full[df_full['pct']<30].sort_values("pct",ascending=False).head(15)[['name','price','pct']], use_container_width=True)
             with t2: 
+                # 兼容不同数据源的字段名
                 sort_col = 'money_flow' if 'money_flow' in df_full.columns else 'total_amount'
                 st.dataframe(df_full.sort_values(sort_col,ascending=False).head(15)[['name','price',sort_col]], use_container_width=True)
         else: st.error("数据源异常")
@@ -397,6 +388,7 @@ def main_app():
 if __name__ == "__main__":
     if st.session_state['logged_in']: main_app()
     else: login_system()
+
 
 
 
